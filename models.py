@@ -103,6 +103,26 @@ class CompetitionResponse(BaseModel):
 class CompetitionJoin(BaseModel):
     competition_id: str
 
+
+# Group Models
+class GroupCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class GroupResponse(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    average_rating: float = 0.0
+    member_count: int = 0
+    members: List[str] = []
+    created_by: str
+    created_at: datetime
+
+class GroupMemberInvite(BaseModel):
+    user_id: str
+
+
 # Session Models
 class SessionData(BaseModel):
     session_id: str
