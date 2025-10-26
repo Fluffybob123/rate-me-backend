@@ -133,3 +133,14 @@ class EmergentUserData(BaseModel):
     name: str
     picture: str
     session_token: str
+
+class NotificationPreferences(BaseModel):
+    reviews: bool = True
+    group_invitations: bool = True
+    competition_invitations: bool = True
+    competition_results: bool = True
+
+class PushTokenRegister(BaseModel):
+    push_token: str
+    device_type: str  # 'ios', 'android', or 'web'
+
