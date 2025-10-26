@@ -813,6 +813,15 @@ async def invite_to_group(
     return {"message": "User invited successfully"}
 
 
+    @api_router.put("/groups/{group_id}", response_model=GroupResponse)
+    async def update_group(
+        group_id: str,
+        group: GroupCreate,
+        request: Request,
+        current_user_id: str = Depends(get_current_user)
+    ):
+
+
 @api_router.delete("/groups/{group_id}")
 async def delete_group(
     group_id: str,
