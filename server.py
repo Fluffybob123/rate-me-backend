@@ -16,6 +16,7 @@ from models import (
     FriendRequest, FriendResponse,
     CompetitionCreate, CompetitionResponse, CompetitionJoin,
     GroupCreate, GroupResponse, GroupMemberInvite,
+    NotificationPreferences, PushTokenRegister,  # ADD THESE
     SessionData, EmergentUserData
 )
 from auth import (
@@ -318,24 +319,6 @@ async def rate_user(
             f"{rater_display_name} rated you {rating.stars} stars",
             {"type": "review", "rating_id": str(result_id)}
         )
-    
-    return RatingResponse(
-        id=str(result_id),
-        rated_user_id=user_id,
-        rater_user_id=current_user_id,
-        rater_username=rater_username,
-        rater_display_name=rater_display_name,
-        rater_profile_picture=rater_profile_picture,
-        stars=rating.stars,
-        comment=rating.comment,
-        created_at=datetime.now(timezone.utc)
-    )
-    await update_user_rating(user_id)
-    
-    rater = await db.users.find_one({"_id": ObjectId(current_user_id)})
-    rater_username = rater["username"] if rater else "Unknown"
-    rater_display_name = rater["display_name"] if rater else "Unknown"
-    rater_profile_picture = rater.get("profile_picture") if rater else None
     
     return RatingResponse(
         id=str(result_id),
@@ -1135,96 +1118,6 @@ async def join_group(
     )
     
     return {"message": "Successfully joined group"}
-
-
-@api_router.post("/groups/{group_id}/invite")
-
-async def invite_to_group(
-
-group_id: str,
-
-invite: GroupMemberInvite,
-
-request: Request,
-
-current_user_id: str = Depends(get_current_user)
-
-):
-
-"""Invite a user to a group (only creator can invite)"""
-
-group = await db.groups.find_one({"_id": ObjectId(group_id)})
-
-
-if not group:
-
-raise HTTPException(status_code=404, detail="Group not found")
-
-
-# Check if current user is the creator
-
-if group["created_by"] != current_user_id:
-
-raise HTTPException(status_code=403, detail="Only group creator can invite members")
-
-
-# Check if user exists
-
-invited_user = await db.users.find_one({"_id": ObjectId(invite.user_id)})
-
-if not invited_user:
-
-raise HTTPException(status_code=404, detail="User not found")
-
-
-# Check if user is already a member
-
-if invite.user_id in group.get("members", []):
-
-raise HTTPException(status_code=400, detail="User is already a member")
-
-
-# Check if invitation already exists
-
-existing_invite = await db.group_invitations.find_one({
-
-"group_id": group_id,
-
-"invited_user_id": invite.user_id,
-
-"status": "pending"
-
-})
-
-
-if existing_invite:
-
-raise HTTPException(status_code=400, detail="Invitation already sent")
-
-
-# Create invitation (don't add to members yet)
-
-invitation_doc = {
-
-"group_id": group_id,
-
-"group_name": group["name"],
-
-"invited_by": current_user_id,
-
-"invited_user_id": invite.user_id,
-
-"status": "pending",
-
-"created_at": datetime.now(timezone.utc)
-
-}
-
-
-await db.group_invitations.insert_one(invitation_doc)
-
-
-return {"message": "Invitation sent successfully"}
 
 
 @api_router.post("/groups/{group_id}/invite")
