@@ -759,6 +759,52 @@ async def reject_competition_invitation(
     
     return {"message": "Invitation rejected"}
 
+@api_router.put("/competitions/{comp_id}")
+async def update_competition(
+    comp_id: str,
+    comp_update: CompetitionCreate,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Update competition name (only creator can edit)"""
+    comp = await db.competitions.find_one({"_id": ObjectId(comp_id)})
+    
+    if not comp:
+        raise HTTPException(status_code=404, detail="Competition not found")
+    
+    if comp["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only the creator can edit this competition")
+    
+    await db.competitions.update_one(
+        {"_id": ObjectId(comp_id)},
+        {"$set": {"name": comp_update.name}}
+    )
+    
+    return {"message": "Competition updated successfully"}
+
+
+@api_router.delete("/competitions/{comp_id}")
+async def delete_competition(
+    comp_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Delete competition (only creator can delete)"""
+    comp = await db.competitions.find_one({"_id": ObjectId(comp_id)})
+    
+    if not comp:
+        raise HTTPException(status_code=404, detail="Competition not found")
+    
+    if comp["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only the creator can delete this competition")
+    
+    await db.competitions.delete_one({"_id": ObjectId(comp_id)})
+    
+    # Delete all related invitations
+    await db.competition_invitations.delete_many({"competition_id": comp_id})
+    
+    return {"message": "Competition deleted successfully"}
+
 
     # ==================== GROUP ROUTES ====================
 
