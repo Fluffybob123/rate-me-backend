@@ -568,6 +568,27 @@ async def get_competition(competition_id: str):
     comp_response = serialize_doc(competition)
     return CompetitionResponse(**comp_response)
 
+@api_router.get("/competitions/{competition_id}/participants", response_model=List[UserResponse])
+async def get_competition_participants(competition_id: str, request: Request):
+    """Get all participants in a competition with their current ratings"""
+    comp = await db.competitions.find_one({"_id": ObjectId(competition_id)})
+    
+    if not comp:
+        raise HTTPException(status_code=404, detail="Competition not found")
+    
+    participants = []
+    for p in comp["participants"]:
+        user = await db.users.find_one({"_id": ObjectId(p["user_id"])})
+        if user:
+            user_response = serialize_doc(user.copy())
+            del user_response["password"]
+            participants.append(UserResponse(**user_response))
+    
+    # Sort by average rating descending
+    participants.sort(key=lambda x: x.average_rating, reverse=True)
+    
+    return participants
+
 
 app.include_router(api_router)
 
