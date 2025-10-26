@@ -814,11 +814,49 @@ async def invite_to_group(
 
 
     @api_router.put("/groups/{group_id}", response_model=GroupResponse)
-    async def update_group(
-        group_id: str,
-        group: GroupCreate,
-        request: Request,
-        current_user_id: str = Depends(get_current_user)
+async def update_group(
+    group_id: str,
+    group: GroupCreate,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Update a group (only creator can update)"""
+    existing_group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    
+    if not existing_group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Check if current user is the creator
+    if existing_group["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only group creator can update the group")
+    
+    # Update group
+    await db.groups.update_one(
+        {"_id": ObjectId(group_id)},
+        {"$set": {
+            "name": group.name,
+            "description": group.description
+        }}
+    )
+    
+    # Calculate average rating from all members
+    member_ratings = []
+    for member_id in existing_group.get("members", []):
+        user = await db.users.find_one({"_id": ObjectId(member_id)})
+        if user:
+            member_ratings.append(user.get("average_rating", 0.0))
+    
+    avg_rating = sum(member_ratings) / len(member_ratings) if member_ratings else 0.0
+    
+    return GroupResponse(
+        id=str(existing_group["_id"]),
+        name=group.name,
+        description=group.description,
+        average_rating=avg_rating,
+        member_count=len(existing_group.get("members", [])),
+        members=existing_group.get("members", []),
+        created_by=existing_group["created_by"],
+        created_at=existing_group["created_at"]
     ):
 
 
