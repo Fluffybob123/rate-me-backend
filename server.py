@@ -575,26 +575,166 @@ async def get_competition(competition_id: str):
     comp_response = serialize_doc(competition)
     return CompetitionResponse(**comp_response)
 
-@api_router.get("/competitions/{competition_id}/participants", response_model=List[UserResponse])
-async def get_competition_participants(competition_id: str, request: Request):
-    """Get all participants in a competition with their current ratings"""
-    comp = await db.competitions.find_one({"_id": ObjectId(competition_id)})
+@api_router.post("/competitions/{comp_id}/invite")
+async def invite_to_competition(
+    comp_id: str,
+    friend_req: FriendRequest,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Invite a user to join a competition"""
+    comp = await db.competitions.find_one({"_id": ObjectId(comp_id)})
     
     if not comp:
         raise HTTPException(status_code=404, detail="Competition not found")
     
-    participants = []
-    for p in comp.get("participants", []):
-        user = await db.users.find_one({"_id": ObjectId(p["user_id"])})
-        if user:
-            user_response = serialize_doc(user.copy())
-            user_response.pop("password", None)
-            participants.append(UserResponse(**user_response))
+    if comp["status"] != "active":
+        raise HTTPException(status_code=400, detail="Competition is not active")
     
-    # Sort by average rating descending
-    participants.sort(key=lambda x: x.average_rating, reverse=True)
+    # Check if invitee exists
+    invitee = await db.users.find_one({"_id": ObjectId(friend_req.friend_id)})
+    if not invitee:
+        raise HTTPException(status_code=404, detail="User not found")
     
-    return participants
+    # Check if already in competition
+    if any(p["user_id"] == friend_req.friend_id for p in comp["participants"]):
+        raise HTTPException(status_code=400, detail="User already in this competition")
+    
+    # Check if invitation already exists
+    existing_invite = await db.competition_invitations.find_one({
+        "competition_id": comp_id,
+        "invited_user_id": friend_req.friend_id,
+        "status": "pending"
+    })
+    
+    if existing_invite:
+        raise HTTPException(status_code=400, detail="Invitation already sent")
+    
+    # Create invitation
+    invitation_doc = {
+        "competition_id": comp_id,
+        "competition_name": comp["name"],
+        "invited_by": current_user_id,
+        "invited_user_id": friend_req.friend_id,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc)
+    }
+    
+    await db.competition_invitations.insert_one(invitation_doc)
+    
+    return {"message": "Invitation sent successfully"}
+
+
+@api_router.get("/competitions/invitations/pending")
+async def get_pending_competition_invitations(
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get all pending competition invitations for current user"""
+    invitations = await db.competition_invitations.find({
+        "invited_user_id": current_user_id,
+        "status": "pending"
+    }).to_list(100)
+    
+    result = []
+    for inv in invitations:
+        # Get inviter info
+        inviter = await db.users.find_one({"_id": ObjectId(inv["invited_by"])})
+        inviter_name = inviter.get("display_name", "Unknown") if inviter else "Unknown"
+        
+        # Check if competition is still active
+        comp = await db.competitions.find_one({"_id": ObjectId(inv["competition_id"])})
+        if comp and comp["status"] == "active":
+            result.append({
+                "id": str(inv["_id"]),
+                "competition_id": inv["competition_id"],
+                "competition_name": inv["competition_name"],
+                "invited_by": inv["invited_by"],
+                "inviter_name": inviter_name,
+                "created_at": inv["created_at"]
+            })
+    
+    return result
+
+
+@api_router.post("/competitions/invitations/{invitation_id}/accept")
+async def accept_competition_invitation(
+    invitation_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Accept a competition invitation"""
+    invitation = await db.competition_invitations.find_one({"_id": ObjectId(invitation_id)})
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    
+    if invitation["invited_user_id"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if invitation["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Invitation already processed")
+    
+    # Get competition
+    comp = await db.competitions.find_one({"_id": ObjectId(invitation["competition_id"])})
+    
+    if not comp:
+        raise HTTPException(status_code=404, detail="Competition not found")
+    
+    if comp["status"] != "active":
+        raise HTTPException(status_code=400, detail="Competition is no longer active")
+    
+    # Get user's current rating
+    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    
+    # Add user to competition
+    await db.competitions.update_one(
+        {"_id": ObjectId(invitation["competition_id"])},
+        {"$push": {"participants": {
+            "user_id": current_user_id,
+            "username": user["username"],
+            "display_name": user["display_name"],
+            "profile_picture": user.get("profile_picture"),
+            "average_rating": user.get("average_rating", 0.0),
+            "total_ratings": user.get("total_ratings", 0),
+            "joined_at": datetime.now(timezone.utc)
+        }}}
+    )
+    
+    # Update invitation status
+    await db.competition_invitations.update_one(
+        {"_id": ObjectId(invitation_id)},
+        {"$set": {"status": "accepted"}}
+    )
+    
+    return {"message": "Invitation accepted"}
+
+
+@api_router.post("/competitions/invitations/{invitation_id}/reject")
+async def reject_competition_invitation(
+    invitation_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Reject a competition invitation"""
+    invitation = await db.competition_invitations.find_one({"_id": ObjectId(invitation_id)})
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    
+    if invitation["invited_user_id"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if invitation["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Invitation already processed")
+    
+    # Update invitation status
+    await db.competition_invitations.update_one(
+        {"_id": ObjectId(invitation_id)},
+        {"$set": {"status": "rejected"}}
+    )
+    
+    return {"message": "Invitation rejected"}
 
 
     # ==================== GROUP ROUTES ====================
