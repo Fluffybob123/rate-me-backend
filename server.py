@@ -592,6 +592,25 @@ async def finalize_competition(
         }}
     )
     
+    # Send notifications to winner and loser
+    winner_user = await db.users.find_one({"_id": ObjectId(winner["user_id"])})
+    if winner_user and winner_user.get("notification_preferences", {}).get("competition_results", True):
+        await send_push_notification(
+            winner["user_id"],
+            "🏆 You Won!",
+            f"Congratulations! You won {competition['name']}",
+            {"type": "competition_result", "competition_id": competition_id, "result": "winner"}
+        )
+    
+    loser_user = await db.users.find_one({"_id": ObjectId(loser["user_id"])})
+    if loser_user and loser_user.get("notification_preferences", {}).get("competition_results", True):
+        await send_push_notification(
+            loser["user_id"],
+            "Competition Ended",
+            f"{competition['name']} has ended. Keep improving!",
+            {"type": "competition_result", "competition_id": competition_id, "result": "loser"}
+        )
+    
     return {"message": "Competition finalized", "winner": winner, "loser": loser}
 
 
