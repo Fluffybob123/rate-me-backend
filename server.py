@@ -14,7 +14,8 @@ from models import (
     UserCreate, UserLogin, UserResponse, UserUpdate, Token,
     RatingCreate, RatingResponse,
     FriendRequest, FriendResponse,
-    CompetitionCreate, CompetitionResponse, CompetitionJoin
+    CompetitionCreate, CompetitionResponse, CompetitionJoin,
+    GroupCreate, GroupResponse, GroupMemberInvite  
 )
 from auth import (
     get_password_hash, verify_password, create_access_token,
@@ -588,6 +589,249 @@ async def get_competition_participants(competition_id: str, request: Request):
     participants.sort(key=lambda x: x.average_rating, reverse=True)
     
     return participants
+
+
+    # ==================== GROUP ROUTES ====================
+
+@api_router.post("/groups", response_model=GroupResponse)
+async def create_group(
+    group: GroupCreate,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Create a new group"""
+    group_data = {
+        "name": group.name,
+        "description": group.description,
+        "members": [current_user_id],
+        "created_by": current_user_id,
+        "created_at": datetime.now(timezone.utc)
+    }
+    
+    result = await db.groups.insert_one(group_data)
+    
+    # Calculate average rating
+    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    avg_rating = user.get("average_rating", 0.0)
+    
+    return GroupResponse(
+        id=str(result.inserted_id),
+        name=group_data["name"],
+        description=group_data.get("description"),
+        average_rating=avg_rating,
+        member_count=1,
+        members=group_data["members"],
+        created_by=group_data["created_by"],
+        created_at=group_data["created_at"]
+    )
+
+
+@api_router.get("/groups", response_model=List[GroupResponse])
+async def get_all_groups(request: Request, current_user_id: str = Depends(get_current_user)):
+    """Get all groups"""
+    groups = await db.groups.find().to_list(100)
+    
+    result = []
+    for group in groups:
+        # Calculate average rating from all members
+        member_ratings = []
+        for member_id in group.get("members", []):
+            user = await db.users.find_one({"_id": ObjectId(member_id)})
+            if user:
+                member_ratings.append(user.get("average_rating", 0.0))
+        
+        avg_rating = sum(member_ratings) / len(member_ratings) if member_ratings else 0.0
+        
+        result.append(GroupResponse(
+            id=str(group["_id"]),
+            name=group["name"],
+            description=group.get("description"),
+            average_rating=avg_rating,
+            member_count=len(group.get("members", [])),
+            members=group.get("members", []),
+            created_by=group["created_by"],
+            created_at=group["created_at"]
+        ))
+    
+    return result
+
+
+@api_router.get("/groups/search", response_model=List[GroupResponse])
+async def search_groups(
+    q: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Search groups by name"""
+    groups = await db.groups.find({
+        "name": {"$regex": q, "$options": "i"}
+    }).to_list(50)
+    
+    result = []
+    for group in groups:
+        # Calculate average rating from all members
+        member_ratings = []
+        for member_id in group.get("members", []):
+            user = await db.users.find_one({"_id": ObjectId(member_id)})
+            if user:
+                member_ratings.append(user.get("average_rating", 0.0))
+        
+        avg_rating = sum(member_ratings) / len(member_ratings) if member_ratings else 0.0
+        
+        result.append(GroupResponse(
+            id=str(group["_id"]),
+            name=group["name"],
+            description=group.get("description"),
+            average_rating=avg_rating,
+            member_count=len(group.get("members", [])),
+            members=group.get("members", []),
+            created_by=group["created_by"],
+            created_at=group["created_at"]
+        ))
+    
+    return result
+
+
+@api_router.get("/groups/{group_id}", response_model=GroupResponse)
+async def get_group(
+    group_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get group details"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Calculate average rating from all members
+    member_ratings = []
+    for member_id in group.get("members", []):
+        user = await db.users.find_one({"_id": ObjectId(member_id)})
+        if user:
+            member_ratings.append(user.get("average_rating", 0.0))
+    
+    avg_rating = sum(member_ratings) / len(member_ratings) if member_ratings else 0.0
+    
+    return GroupResponse(
+        id=str(group["_id"]),
+        name=group["name"],
+        description=group.get("description"),
+        average_rating=avg_rating,
+        member_count=len(group.get("members", [])),
+        members=group.get("members", []),
+        created_by=group["created_by"],
+        created_at=group["created_at"]
+    )
+
+
+@api_router.get("/groups/{group_id}/members", response_model=List[UserResponse])
+async def get_group_members(
+    group_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get all members of a group"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    members = []
+    for member_id in group.get("members", []):
+        user = await db.users.find_one({"_id": ObjectId(member_id)})
+        if user:
+            members.append(UserResponse(
+                id=str(user["_id"]),
+                username=user["username"],
+                email=user["email"],
+                display_name=user["display_name"],
+                bio=user.get("bio"),
+                profile_picture=user.get("profile_picture"),
+                average_rating=user.get("average_rating", 0.0),
+                total_ratings=user.get("total_ratings", 0),
+                created_at=user["created_at"],
+                banner=user.get("banner"),
+                banner_expiry=user.get("banner_expiry")
+            ))
+    
+    return members
+
+
+@api_router.post("/groups/{group_id}/join")
+async def join_group(
+    group_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Join a group"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Check if already a member
+    if current_user_id in group.get("members", []):
+        raise HTTPException(status_code=400, detail="Already a member of this group")
+    
+    # Add user to group
+    await db.groups.update_one(
+        {"_id": ObjectId(group_id)},
+        {"$push": {"members": current_user_id}}
+    )
+    
+    return {"message": "Successfully joined group"}
+
+
+@api_router.post("/groups/{group_id}/invite")
+async def invite_to_group(
+    group_id: str,
+    invite: GroupMemberInvite,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Invite a user to a group (only creator can invite)"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Check if current user is the creator
+    if group["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only group creator can invite members")
+    
+    # Check if user already a member
+    if invite.user_id in group.get("members", []):
+        raise HTTPException(status_code=400, detail="User is already a member")
+    
+    # Add user to group
+    await db.groups.update_one(
+        {"_id": ObjectId(group_id)},
+        {"$push": {"members": invite.user_id}}
+    )
+    
+    return {"message": "User invited successfully"}
+
+
+@api_router.delete("/groups/{group_id}")
+async def delete_group(
+    group_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Delete a group (only creator can delete)"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Check if current user is the creator
+    if group["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only group creator can delete the group")
+    
+    await db.groups.delete_one({"_id": ObjectId(group_id)})
+    
+    return {"message": "Group deleted successfully"}
 
 
 app.include_router(api_router)
