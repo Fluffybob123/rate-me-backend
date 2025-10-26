@@ -437,7 +437,7 @@ async def create_competition(
     return CompetitionResponse(**competition_dict)
 
 
-@api_router.post("/competitions/{competition_id}/join")
+@api_router.post("/competitions/join/{competition_id}")
 async def join_competition(
     competition_id: str,
     current_user_id: str = Depends(get_current_user)
