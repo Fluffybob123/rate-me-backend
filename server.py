@@ -1226,14 +1226,6 @@ await db.group_invitations.insert_one(invitation_doc)
 
 return {"message": "Invitation sent successfully"}
 
-Oct 26, 04:26 PM
-
-Copy
-Robot
-Hey Elijah, Quick input needed :
-Ask Question
-Agent will continue working after your reply
-Here's the updated group invitation endpoint with push notifications:
 
 @api_router.post("/groups/{group_id}/invite")
 async def invite_to_group(
