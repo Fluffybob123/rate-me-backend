@@ -68,9 +68,9 @@ async def register(user: UserCreate):
     }
     
     result = await db.users.insert_one(user_dict)
+    # Add id explicitly for response and don't try to delete "_id" from the original dict
     user_dict["id"] = str(result.inserted_id)
-    del user_dict["_id"]
-    del user_dict["password"]
+    user_dict.pop("password", None)
     
     access_token = create_access_token(data={"sub": str(result.inserted_id)})
     
@@ -97,7 +97,7 @@ async def login(user: UserLogin):
     access_token = create_access_token(data={"sub": str(db_user["_id"])})
     
     user_response = serialize_doc(db_user.copy())
-    del user_response["password"]
+    user_response.pop("password", None)
     
     return Token(
         access_token=access_token,
@@ -113,7 +113,7 @@ async def get_me(current_user_id: str = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="User not found")
     
     user_response = serialize_doc(user.copy())
-    del user_response["password"]
+    user_response.pop("password", None)
     
     now = datetime.now(timezone.utc)
     banner = None
@@ -130,7 +130,7 @@ async def update_user_rating(user_id: str):
     ratings = await db.ratings.find({"rated_user_id": user_id}).to_list(None)
     
     if ratings:
-        total_stars = sum(r["stars"] for r in ratings)
+        total_stars = sum(r.get("stars", 0) for r in ratings)
         avg_rating = total_stars / len(ratings)
     else:
         avg_rating = 0.0
@@ -154,7 +154,7 @@ async def get_profile(
         raise HTTPException(status_code=404, detail="User not found")
     
     user_response = serialize_doc(user.copy())
-    del user_response["password"]
+    user_response.pop("password", None)
     
     is_friend = False
     friend_request_status = "none"
@@ -168,10 +168,10 @@ async def get_profile(
         })
         
         if friendship:
-            if friendship["status"] == "accepted":
+            if friendship.get("status") == "accepted":
                 is_friend = True
             else:
-                friend_request_status = friendship["status"]
+                friend_request_status = friendship.get("status", "none")
     
     user_response["is_friend"] = is_friend
     user_response["friend_request_status"] = friend_request_status
@@ -202,7 +202,7 @@ async def update_profile(
     
     user = await db.users.find_one({"_id": ObjectId(current_user_id)})
     user_response = serialize_doc(user.copy())
-    del user_response["password"]
+    user_response.pop("password", None)
     
     return UserResponse(**user_response)
 
@@ -245,7 +245,7 @@ async def search_users(
             continue
             
         user_response = serialize_doc(user.copy())
-        del user_response["password"]
+        user_response.pop("password", None)
         results.append(UserResponse(**user_response))
     
     return results
@@ -303,14 +303,17 @@ async def rate_user(
     await update_user_rating(user_id)
     
     rater = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    rater_username = rater["username"] if rater else "Unknown"
+    rater_display_name = rater["display_name"] if rater else "Unknown"
+    rater_profile_picture = rater.get("profile_picture") if rater else None
     
     return RatingResponse(
         id=str(result_id),
         rated_user_id=user_id,
         rater_user_id=current_user_id,
-        rater_username=rater["username"],
-        rater_display_name=rater["display_name"],
-        rater_profile_picture=rater.get("profile_picture"),
+        rater_username=rater_username,
+        rater_display_name=rater_display_name,
+        rater_profile_picture=rater_profile_picture,
         stars=rating.stars,
         comment=rating.comment,
         created_at=datetime.now(timezone.utc)
@@ -374,14 +377,17 @@ async def get_ratings(user_id: str):
     result = []
     for rating in ratings:
         rater = await db.users.find_one({"_id": ObjectId(rating["rater_user_id"])})
+        rater_username = rater["username"] if rater else "Unknown"
+        rater_display_name = rater["display_name"] if rater else "Unknown"
+        rater_profile_picture = rater.get("profile_picture") if rater else None
         
         result.append(RatingResponse(
             id=str(rating["_id"]),
             rated_user_id=rating["rated_user_id"],
             rater_user_id=rating["rater_user_id"],
-            rater_username=rater["username"],
-            rater_display_name=rater["display_name"],
-            rater_profile_picture=rater.get("profile_picture"),
+            rater_username=rater_username,
+            rater_display_name=rater_display_name,
+            rater_profile_picture=rater_profile_picture,
             stars=rating["stars"],
             comment=rating.get("comment"),
             created_at=rating["created_at"]
@@ -433,7 +439,6 @@ async def create_competition(
     
     result = await db.competitions.insert_one(competition_dict)
     competition_dict["id"] = str(result.inserted_id)
-    del competition_dict["_id"]
     
     return CompetitionResponse(**competition_dict)
 
@@ -521,10 +526,10 @@ async def finalize_competition(
     
     for p in participants:
         user = await db.users.find_one({"_id": ObjectId(p["user_id"])})
-        p["average_rating"] = user.get("average_rating", 0.0)
-        p["total_ratings"] = user.get("total_ratings", 0)
+        p["average_rating"] = user.get("average_rating", 0.0) if user else 0.0
+        p["total_ratings"] = user.get("total_ratings", 0) if user else 0
     
-    sorted_participants = sorted(participants, key=lambda x: (-x["average_rating"], -x["total_ratings"]))
+    sorted_participants = sorted(participants, key=lambda x: (-x.get("average_rating", 0.0), -x.get("total_ratings", 0)))
     
     winner = sorted_participants[0]
     loser = sorted_participants[-1]
@@ -578,11 +583,11 @@ async def get_competition_participants(competition_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Competition not found")
     
     participants = []
-    for p in comp["participants"]:
+    for p in comp.get("participants", []):
         user = await db.users.find_one({"_id": ObjectId(p["user_id"])})
         if user:
             user_response = serialize_doc(user.copy())
-            del user_response["password"]
+            user_response.pop("password", None)
             participants.append(UserResponse(**user_response))
     
     # Sort by average rating descending
@@ -612,7 +617,7 @@ async def create_group(
     
     # Calculate average rating
     user = await db.users.find_one({"_id": ObjectId(current_user_id)})
-    avg_rating = user.get("average_rating", 0.0)
+    avg_rating = user.get("average_rating", 0.0) if user else 0.0
     
     return GroupResponse(
         id=str(result.inserted_id),
@@ -839,7 +844,7 @@ async def update_group(
         }}
     )
     
-    # Calculate average rating from all members
+    # Recompute average rating from all members
     member_ratings = []
     for member_id in existing_group.get("members", []):
         user = await db.users.find_one({"_id": ObjectId(member_id)})
@@ -859,26 +864,6 @@ async def update_group(
         created_at=existing_group["created_at"]
     )
     
-    # Calculate average rating from all members
-    member_ratings = []
-    for member_id in existing_group.get("members", []):
-        user = await db.users.find_one({"_id": ObjectId(member_id)})
-        if user:
-            member_ratings.append(user.get("average_rating", 0.0))
-    
-    avg_rating = sum(member_ratings) / len(member_ratings) if member_ratings else 0.0
-    
-    return GroupResponse(
-        id=str(existing_group["_id"]),
-        name=group.name,
-        description=group.description,
-        average_rating=avg_rating,
-        member_count=len(existing_group.get("members", [])),
-        members=existing_group.get("members", []),
-        created_by=existing_group["created_by"],
-        created_at=existing_group["created_at"]
-    ):
-
 
 @api_router.delete("/groups/{group_id}")
 async def delete_group(
@@ -907,4 +892,3 @@ app.include_router(api_router)
 @app.get("/")
 async def root():
     return {"message": "Rate Me API is running"}
-
