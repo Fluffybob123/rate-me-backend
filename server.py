@@ -806,17 +806,126 @@ async def invite_to_group(
     if group["created_by"] != current_user_id:
         raise HTTPException(status_code=403, detail="Only group creator can invite members")
     
-    # Check if user already a member
+    # Check if user exists
+    invited_user = await db.users.find_one({"_id": ObjectId(invite.user_id)})
+    if not invited_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check if user is already a member
     if invite.user_id in group.get("members", []):
         raise HTTPException(status_code=400, detail="User is already a member")
     
+    # Check if invitation already exists
+    existing_invite = await db.group_invitations.find_one({
+        "group_id": group_id,
+        "invited_user_id": invite.user_id,
+        "status": "pending"
+    })
+    
+    if existing_invite:
+        raise HTTPException(status_code=400, detail="Invitation already sent")
+    
+    # Create invitation (don't add to members yet)
+    invitation_doc = {
+        "group_id": group_id,
+        "group_name": group["name"],
+        "invited_by": current_user_id,
+        "invited_user_id": invite.user_id,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc)
+    }
+    
+    await db.group_invitations.insert_one(invitation_doc)
+    
+    return {"message": "Invitation sent successfully"}
+
+@api_router.get("/groups/invitations/pending")
+async def get_pending_invitations(
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get all pending group invitations for current user"""
+    invitations = await db.group_invitations.find({
+        "invited_user_id": current_user_id,
+        "status": "pending"
+    }).to_list(100)
+    
+    result = []
+    for inv in invitations:
+        # Get inviter info
+        inviter = await db.users.find_one({"_id": ObjectId(inv["invited_by"])})
+        inviter_name = inviter.get("display_name", "Unknown") if inviter else "Unknown"
+        
+        result.append({
+            "id": str(inv["_id"]),
+            "group_id": inv["group_id"],
+            "group_name": inv["group_name"],
+            "invited_by": inv["invited_by"],
+            "inviter_name": inviter_name,
+            "created_at": inv["created_at"]
+        })
+    
+    return result
+
+
+@api_router.post("/groups/invitations/{invitation_id}/accept")
+async def accept_group_invitation(
+    invitation_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Accept a group invitation"""
+    invitation = await db.group_invitations.find_one({"_id": ObjectId(invitation_id)})
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    
+    if invitation["invited_user_id"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if invitation["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Invitation already processed")
+    
     # Add user to group
     await db.groups.update_one(
-        {"_id": ObjectId(group_id)},
-        {"$push": {"members": invite.user_id}}
+        {"_id": ObjectId(invitation["group_id"])},
+        {"$push": {"members": current_user_id}}
     )
     
-    return {"message": "User invited successfully"}
+    # Update invitation status
+    await db.group_invitations.update_one(
+        {"_id": ObjectId(invitation_id)},
+        {"$set": {"status": "accepted"}}
+    )
+    
+    return {"message": "Invitation accepted"}
+
+
+@api_router.post("/groups/invitations/{invitation_id}/reject")
+async def reject_group_invitation(
+    invitation_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Reject a group invitation"""
+    invitation = await db.group_invitations.find_one({"_id": ObjectId(invitation_id)})
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    
+    if invitation["invited_user_id"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if invitation["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Invitation already processed")
+    
+    # Update invitation status
+    await db.group_invitations.update_one(
+        {"_id": ObjectId(invitation_id)},
+        {"$set": {"status": "rejected"}}
+    )
+    
+    return {"message": "Invitation rejected"}
 
 
 @api_router.put("/groups/{group_id}", response_model=GroupResponse)
