@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import qrcode
 import io
 import base64
+import httpx
 from bson import ObjectId
 
 from models import (
@@ -922,6 +923,37 @@ async def send_push_notification(user_id: str, title: str, body: str, data: dict
         "created_at": datetime.now(timezone.utc)
     }
     await db.notifications.insert_one(notification_doc)
+    
+    # Send push notification via Expo Push API
+    push_token = user.get("push_token")
+    if push_token and push_token.startswith("ExponentPushToken"):
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    "https://exp.host/--/api/v2/push/send",
+                    json={
+                        "to": push_token,
+                        "title": title,
+                        "body": body,
+                        "data": data or {},
+                        "sound": "default",
+                        "priority": "high",
+                    },
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=10.0
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get("data", {}).get("status") == "error":
+                        print(f"Expo Push Error: {result.get('data', {}).get('message')}")
+                else:
+                    print(f"Failed to send push notification: {response.status_code}")
+        except Exception as e:
+            print(f"Error sending push notification: {str(e)}")
     
     # TODO: Send actual push notification via Expo Push API
     # This will be implemented when we have the Expo push notification service
