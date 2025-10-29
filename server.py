@@ -87,10 +87,13 @@ async def send_verification_email(email: str, code: str, username: str):
             """
         }
         
-        resend.Emails.send(params)
+        response = resend.Emails.send(params)
+        print(f"✅ Verification email sent successfully to {email}. Response: {response}")
         return True
     except Exception as e:
-        print(f"Error sending verification email: {str(e)}")
+        print(f"❌ Error sending verification email to {email}: {str(e)}")
+        print(f"Exception type: {type(e).__name__}")
+        print(f"Exception details: {repr(e)}")
         return False
 
 
