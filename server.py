@@ -10,6 +10,9 @@ import io
 import base64
 import httpx
 from bson import ObjectId
+import resend
+import random
+import string
 
 from models import (
     UserCreate, UserLogin, UserResponse, UserUpdate, Token,
@@ -17,7 +20,8 @@ from models import (
     FriendRequest, FriendResponse,
     CompetitionCreate, CompetitionResponse, CompetitionJoin,
     GroupCreate, GroupResponse, GroupMemberInvite,
-    NotificationPreferences, PushTokenRegister,  # ADD THESE
+    NotificationPreferences, PushTokenRegister,
+    VerifyEmailRequest, ResendCodeRequest, VerificationResponse,  # NEW
     SessionData, EmergentUserData
 )
 from auth import (
@@ -41,6 +45,9 @@ MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
 client = AsyncIOMotorClient(MONGO_URL)
 db = client.rate_me
 
+# Resend configuration
+resend.api_key = "re_EDuB3JG7_293dQz9dvJo5WGvCEXFVKqrA"
+
 from fastapi import APIRouter
 api_router = APIRouter(prefix="/api")
 
@@ -51,11 +58,53 @@ def serialize_doc(doc):
         del doc["_id"]
     return doc
 
+
+# ==================== EMAIL VERIFICATION HELPERS ====================
+
+def generate_verification_code() -> str:
+    """Generate a 6-digit verification code"""
+    return ''.join(random.choices(string.digits, k=6))
+
+
+async def send_verification_email(email: str, code: str, username: str):
+    """Send verification code via Resend"""
+    try:
+        params = {
+            "from": "Rate Me <onboarding@resend.dev>",
+            "to": [email],
+            "subject": "Verify Your Email - Rate Me",
+            "html": f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #0891b2;">Welcome to Rate Me, {username}!</h2>
+                <p>Thanks for signing up! Please verify your email address to access all features.</p>
+                <div style="background-color: #f0f9ff; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <p style="margin: 0; font-size: 14px; color: #666;">Your verification code is:</p>
+                    <h1 style="margin: 10px 0; font-size: 36px; letter-spacing: 8px; color: #0891b2;">{code}</h1>
+                </div>
+                <p style="color: #666; font-size: 14px;">This code will expire in 15 minutes.</p>
+                <p style="color: #666; font-size: 14px;">If you didn't request this, please ignore this email.</p>
+            </div>
+            """
+        }
+        
+        resend.Emails.send(params)
+        return True
+    except Exception as e:
+        print(f"Error sending verification email: {str(e)}")
+        return False
+
+
+# ==================== AUTH ROUTES ====================
+
 @api_router.post("/auth/register", response_model=Token)
 async def register(user: UserCreate):
     existing_user = await db.users.find_one({"$or": [{"username": user.username}, {"email": user.email}]})
     if existing_user:
         raise HTTPException(status_code=400, detail="Username or email already exists")
+    
+    # Generate verification code
+    verification_code = generate_verification_code()
+    code_expiry = datetime.now(timezone.utc) + timedelta(minutes=15)
     
     hashed_password = get_password_hash(user.password)
     user_dict = {
@@ -67,13 +116,20 @@ async def register(user: UserCreate):
         "profile_picture": None,
         "average_rating": 0.0,
         "total_ratings": 0,
-        "created_at": datetime.now(timezone.utc)
+        "created_at": datetime.now(timezone.utc),
+        "is_verified": False,
+        "verification_code": verification_code,
+        "verification_code_expiry": code_expiry
     }
     
     result = await db.users.insert_one(user_dict)
-    # Add id explicitly for response and don't try to delete "_id" from the original dict
     user_dict["id"] = str(result.inserted_id)
     user_dict.pop("password", None)
+    
+    # Send verification email
+    email_sent = await send_verification_email(user.email, verification_code, user.username)
+    if not email_sent:
+        print(f"Failed to send verification email to {user.email}")
     
     access_token = create_access_token(data={"sub": str(result.inserted_id)})
     
@@ -94,13 +150,21 @@ async def login(user: UserLogin):
         ]
     })
     
-    if not db_user or not verify_password(user.password, db_user["password"]):
+    if not db_user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Check if user has password (not OAuth user)
+    if not db_user.get("password"):
+        raise HTTPException(status_code=401, detail="This account uses Google login. Please sign in with Google.")
+    
+    if not verify_password(user.password, db_user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     access_token = create_access_token(data={"sub": str(db_user["_id"])})
     
     user_response = serialize_doc(db_user.copy())
     user_response.pop("password", None)
+    user_response["is_verified"] = db_user.get("is_verified", False)
     
     return Token(
         access_token=access_token,
@@ -117,6 +181,7 @@ async def get_me(current_user_id: str = Depends(get_current_user)):
     
     user_response = serialize_doc(user.copy())
     user_response.pop("password", None)
+    user_response["is_verified"] = user.get("is_verified", False)
     
     now = datetime.now(timezone.utc)
     banner = None
@@ -128,6 +193,93 @@ async def get_me(current_user_id: str = Depends(get_current_user)):
     
     return UserResponse(**user_response)
 
+
+# ==================== EMAIL VERIFICATION ROUTES ====================
+
+@api_router.post("/auth/verify-email", response_model=VerificationResponse)
+async def verify_email(request_data: VerifyEmailRequest, current_user_id: str = Depends(get_current_user)):
+    """Verify user email with code"""
+    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.get("is_verified"):
+        return VerificationResponse(
+            message="Email already verified",
+            is_verified=True
+        )
+    
+    # Check if code matches
+    if user.get("verification_code") != request_data.code:
+        raise HTTPException(status_code=400, detail="Invalid verification code")
+    
+    # Check if code is expired
+    code_expiry = user.get("verification_code_expiry")
+    if not code_expiry or code_expiry < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Verification code expired. Please request a new code.")
+    
+    # Update user as verified
+    await db.users.update_one(
+        {"_id": ObjectId(current_user_id)},
+        {
+            "$set": {"is_verified": True},
+            "$unset": {"verification_code": "", "verification_code_expiry": ""}
+        }
+    )
+    
+    return VerificationResponse(
+        message="Email verified successfully",
+        is_verified=True
+    )
+
+
+@api_router.post("/auth/resend-verification", response_model=dict)
+async def resend_verification_code(current_user_id: str = Depends(get_current_user)):
+    """Resend verification code to user's email"""
+    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.get("is_verified"):
+        raise HTTPException(status_code=400, detail="Email already verified")
+    
+    # Generate new code
+    verification_code = generate_verification_code()
+    code_expiry = datetime.now(timezone.utc) + timedelta(minutes=15)
+    
+    # Update user with new code
+    await db.users.update_one(
+        {"_id": ObjectId(current_user_id)},
+        {
+            "$set": {
+                "verification_code": verification_code,
+                "verification_code_expiry": code_expiry
+            }
+        }
+    )
+    
+    # Send email
+    email_sent = await send_verification_email(user["email"], verification_code, user["username"])
+    if not email_sent:
+        raise HTTPException(status_code=500, detail="Failed to send verification email")
+    
+    return {"message": "Verification code sent successfully"}
+
+
+@api_router.get("/auth/verification-status", response_model=dict)
+async def get_verification_status(current_user_id: str = Depends(get_current_user)):
+    """Get user's verification status"""
+    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {
+        "is_verified": user.get("is_verified", False),
+        "email": user["email"]
+    }
+
+
+# ==================== PROFILE ROUTES ====================
 
 async def update_user_rating(user_id: str):
     ratings = await db.ratings.find({"rated_user_id": user_id}).to_list(None)
@@ -158,6 +310,7 @@ async def get_profile(
     
     user_response = serialize_doc(user.copy())
     user_response.pop("password", None)
+    user_response["is_verified"] = user.get("is_verified", False)
     
     is_friend = False
     friend_request_status = "none"
@@ -206,6 +359,7 @@ async def update_profile(
     user = await db.users.find_one({"_id": ObjectId(current_user_id)})
     user_response = serialize_doc(user.copy())
     user_response.pop("password", None)
+    user_response["is_verified"] = user.get("is_verified", False)
     
     return UserResponse(**user_response)
 
@@ -249,9 +403,13 @@ async def search_users(
             
         user_response = serialize_doc(user.copy())
         user_response.pop("password", None)
+        user_response["is_verified"] = user.get("is_verified", False)
         results.append(UserResponse(**user_response))
     
     return results
+
+
+# ==================== RATING ROUTES (WITH VERIFICATION CHECK) ====================
 
 @api_router.post("/ratings/{user_id}", response_model=RatingResponse)
 async def rate_user(
@@ -260,6 +418,11 @@ async def rate_user(
     request: Request,
     current_user_id: str = Depends(get_current_user)
 ):
+    # Check if user is verified
+    current_user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not current_user or not current_user.get("is_verified", False):
+        raise HTTPException(status_code=403, detail="Please verify your email to rate users")
+    
     if user_id == current_user_id:
         raise HTTPException(status_code=400, detail="Cannot rate yourself")
     
@@ -432,11 +595,19 @@ async def generate_qr_code(user_id: str):
     
     return {"qr_code": f"data:image/png;base64,{img_base64}"}
 
+
+# ==================== COMPETITION ROUTES (WITH VERIFICATION CHECK) ====================
+
 @api_router.post("/competitions", response_model=CompetitionResponse)
 async def create_competition(
     competition: CompetitionCreate,
     current_user_id: str = Depends(get_current_user)
 ):
+    # Check if user is verified
+    current_user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not current_user or not current_user.get("is_verified", False):
+        raise HTTPException(status_code=403, detail="Please verify your email to create competitions")
+    
     start_date = datetime.now(timezone.utc)
     end_date = start_date + timedelta(days=7)
     
@@ -462,6 +633,11 @@ async def join_competition(
     competition_id: str,
     current_user_id: str = Depends(get_current_user)
 ):
+    # Check if user is verified
+    current_user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not current_user or not current_user.get("is_verified", False):
+        raise HTTPException(status_code=403, detail="Please verify your email to join competitions")
+    
     competition = await db.competitions.find_one({"_id": ObjectId(competition_id)})
     if not competition:
         raise HTTPException(status_code=404, detail="Competition not found")
@@ -622,6 +798,7 @@ async def get_competition_participants(competition_id: str, request: Request):
         if user:
             user_response = serialize_doc(user.copy())
             user_response.pop("password", None)
+            user_response["is_verified"] = user.get("is_verified", False)
             participants.append(UserResponse(**user_response))
     
     # Sort by average rating descending
@@ -954,13 +1131,9 @@ async def send_push_notification(user_id: str, title: str, body: str, data: dict
                     print(f"Failed to send push notification: {response.status_code}")
         except Exception as e:
             print(f"Error sending push notification: {str(e)}")
-    
-    # TODO: Send actual push notification via Expo Push API
-    # This will be implemented when we have the Expo push notification service
-    # For now, notifications are stored in DB and can be fetched
 
 
-    # ==================== GROUP ROUTES ====================
+# ==================== GROUP ROUTES (WITH VERIFICATION CHECK) ====================
 
 @api_router.post("/groups", response_model=GroupResponse)
 async def create_group(
@@ -969,6 +1142,11 @@ async def create_group(
     current_user_id: str = Depends(get_current_user)
 ):
     """Create a new group"""
+    # Check if user is verified
+    current_user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not current_user or not current_user.get("is_verified", False):
+        raise HTTPException(status_code=403, detail="Please verify your email to create groups")
+    
     group_data = {
         "name": group.name,
         "description": group.description,
@@ -1121,7 +1299,8 @@ async def get_group_members(
                 total_ratings=user.get("total_ratings", 0),
                 created_at=user["created_at"],
                 banner=user.get("banner"),
-                banner_expiry=user.get("banner_expiry")
+                banner_expiry=user.get("banner_expiry"),
+                is_verified=user.get("is_verified", False)
             ))
     
     return members
@@ -1134,6 +1313,11 @@ async def join_group(
     current_user_id: str = Depends(get_current_user)
 ):
     """Join a group"""
+    # Check if user is verified
+    current_user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not current_user or not current_user.get("is_verified", False):
+        raise HTTPException(status_code=403, detail="Please verify your email to join groups")
+    
     group = await db.groups.find_one({"_id": ObjectId(group_id)})
     
     if not group:
