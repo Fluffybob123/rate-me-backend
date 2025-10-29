@@ -44,6 +44,7 @@ class UserResponse(BaseModel):
     friend_request_status: Optional[str] = None  # pending, accepted, none
     banner: Optional[str] = None  # top-rated, try-harder, None
     banner_expiry: Optional[datetime] = None
+    is_verified: bool = False  # NEW
 
 class UserUpdate(BaseModel):
     display_name: Optional[str] = None
@@ -134,6 +135,7 @@ class EmergentUserData(BaseModel):
     picture: str
     session_token: str
 
+# Notification Models
 class NotificationPreferences(BaseModel):
     reviews: bool = True
     group_invitations: bool = True
@@ -143,3 +145,14 @@ class NotificationPreferences(BaseModel):
 class PushTokenRegister(BaseModel):
     push_token: str
     device_type: str  # 'ios', 'android', or 'web'
+
+# Email Verification Models (NEW)
+class VerifyEmailRequest(BaseModel):
+    code: str
+
+class ResendCodeRequest(BaseModel):
+    email: EmailStr
+
+class VerificationResponse(BaseModel):
+    message: str
+    is_verified: bool
