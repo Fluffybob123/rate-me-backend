@@ -215,8 +215,15 @@ async def verify_email(request_data: VerifyEmailRequest, current_user_id: str = 
     
     # Check if code is expired
     code_expiry = user.get("verification_code_expiry")
-    if not code_expiry or code_expiry < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="Verification code expired. Please request a new code.")
+    if code_expiry:
+        # Handle timezone-naive datetime from MongoDB
+        if code_expiry.tzinfo is None:
+            code_expiry = code_expiry.replace(tzinfo=timezone.utc)
+        
+        if code_expiry < datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="Verification code expired. Please request a new code.")
+    else:
+        raise HTTPException(status_code=400, detail="No verification code found. Please request a new code.")
     
     # Update user as verified
     await db.users.update_one(
