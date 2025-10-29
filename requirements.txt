@@ -13,3 +13,4 @@ pillow==12.0.0
 pydantic==2.12.3
 httpx
 resend
+python-dateutil
