@@ -56,6 +56,27 @@ def serialize_doc(doc):
     if doc and "_id" in doc:
         doc["id"] = str(doc["_id"])
         del doc["_id"]
+    
+    # Handle MongoDB datetime format
+    if doc and "created_at" in doc:
+        if isinstance(doc["created_at"], dict) and "$date" in doc["created_at"]:
+            # Convert MongoDB $date format to datetime
+            from dateutil import parser
+            doc["created_at"] = parser.parse(doc["created_at"]["$date"])
+        elif isinstance(doc["created_at"], str):
+            # Convert string to datetime
+            from dateutil import parser
+            doc["created_at"] = parser.parse(doc["created_at"])
+    
+    # Handle banner_expiry the same way
+    if doc and "banner_expiry" in doc and doc["banner_expiry"]:
+        if isinstance(doc["banner_expiry"], dict) and "$date" in doc["banner_expiry"]:
+            from dateutil import parser
+            doc["banner_expiry"] = parser.parse(doc["banner_expiry"]["$date"])
+        elif isinstance(doc["banner_expiry"], str):
+            from dateutil import parser
+            doc["banner_expiry"] = parser.parse(doc["banner_expiry"])
+    
     return doc
 
 
