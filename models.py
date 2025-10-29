@@ -44,6 +44,7 @@ class UserResponse(BaseModel):
     friend_request_status: Optional[str] = None  # pending, accepted, none
     banner: Optional[str] = None  # top-rated, try-harder, None
     banner_expiry: Optional[datetime] = None
+    is_verified: bool = False
 
 class UserUpdate(BaseModel):
     display_name: Optional[str] = None
@@ -103,7 +104,6 @@ class CompetitionResponse(BaseModel):
 class CompetitionJoin(BaseModel):
     competition_id: str
 
-
 # Group Models
 class GroupCreate(BaseModel):
     name: str
@@ -122,7 +122,6 @@ class GroupResponse(BaseModel):
 class GroupMemberInvite(BaseModel):
     user_id: str
 
-
 # Session Models
 class SessionData(BaseModel):
     session_id: str
@@ -134,13 +133,13 @@ class EmergentUserData(BaseModel):
     picture: str
     session_token: str
 
-class NotificationPreferences(BaseModel):
-    reviews: bool = True
-    group_invitations: bool = True
-    competition_invitations: bool = True
-    competition_results: bool = True
+# Email Verification Models
+class VerifyEmailRequest(BaseModel):
+    code: str
 
-class PushTokenRegister(BaseModel):
-    push_token: str
-    device_type: str  # 'ios', 'android', or 'web'
+class ResendCodeRequest(BaseModel):
+    email: EmailStr
 
+class VerificationResponse(BaseModel):
+    message: str
+    is_verified: bool
