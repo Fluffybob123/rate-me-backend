@@ -1319,20 +1319,10 @@ async def get_group_members(
     for member_id in group.get("members", []):
         user = await db.users.find_one({"_id": ObjectId(member_id)})
         if user:
-            members.append(UserResponse(
-                id=str(user["_id"]),
-                username=user["username"],
-                email=user["email"],
-                display_name=user["display_name"],
-                bio=user.get("bio"),
-                profile_picture=user.get("profile_picture"),
-                average_rating=user.get("average_rating", 0.0),
-                total_ratings=user.get("total_ratings", 0),
-                created_at=user["created_at"],
-                banner=user.get("banner"),
-                banner_expiry=user.get("banner_expiry"),
-                is_verified=user.get("is_verified", False)
-            ))
+            user_response = serialize_doc(user.copy())
+            user_response.pop("password", None)
+            user_response["is_verified"] = user.get("is_verified", False)
+            members.append(UserResponse(**user_response))
     
     return members
 
