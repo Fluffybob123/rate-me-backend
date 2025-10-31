@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -1390,8 +1389,182 @@ async def get_group_members(
     return members
 
 
-# NOTE: Groups are invite-only. Users can only join via invitation acceptance.
-# The public join endpoint has been removed.
+# ==================== GROUP JOIN REQUESTS ====================
+
+@api_router.post("/groups/{group_id}/request-join")
+async def request_join_group(
+    group_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Request to join a group"""
+    # Check if user is verified
+    current_user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not current_user or not current_user.get("is_verified", False):
+        raise HTTPException(status_code=403, detail="Please verify your email to request to join groups")
+    
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Check if already a member
+    if current_user_id in group.get("members", []):
+        raise HTTPException(status_code=400, detail="You are already a member of this group")
+    
+    # Check if request already exists
+    existing_request = await db.group_join_requests.find_one({
+        "group_id": group_id,
+        "user_id": current_user_id,
+        "status": "pending"
+    })
+    
+    if existing_request:
+        raise HTTPException(status_code=400, detail="You have already requested to join this group")
+    
+    # Create join request
+    join_request = {
+        "group_id": group_id,
+        "group_name": group["name"],
+        "user_id": current_user_id,
+        "username": current_user["username"],
+        "display_name": current_user["display_name"],
+        "profile_picture": current_user.get("profile_picture"),
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc)
+    }
+    
+    await db.group_join_requests.insert_one(join_request)
+    
+    # Send notification to group creator
+    creator = await db.users.find_one({"_id": ObjectId(group["created_by"])})
+    if creator and creator.get("notification_preferences", {}).get("group_invitations", True):
+        await send_push_notification(
+            group["created_by"],
+            "Group Join Request",
+            f"{current_user['display_name']} wants to join {group['name']}",
+            {"type": "group_join_request", "group_id": group_id}
+        )
+    
+    return {"message": "Join request sent successfully"}
+
+
+@api_router.get("/groups/{group_id}/join-requests")
+async def get_group_join_requests(
+    group_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get all pending join requests for a group (creator only)"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Only group creator can view join requests
+    if group["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only group creator can view join requests")
+    
+    requests = await db.group_join_requests.find({
+        "group_id": group_id,
+        "status": "pending"
+    }).to_list(100)
+    
+    result = []
+    for req in requests:
+        result.append({
+            "id": str(req["_id"]),
+            "group_id": req["group_id"],
+            "user_id": req["user_id"],
+            "username": req["username"],
+            "display_name": req["display_name"],
+            "profile_picture": req.get("profile_picture"),
+            "created_at": req["created_at"]
+        })
+    
+    return result
+
+
+@api_router.post("/groups/join-requests/{request_id}/accept")
+async def accept_join_request(
+    request_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Accept a join request (creator only)"""
+    join_request = await db.group_join_requests.find_one({"_id": ObjectId(request_id)})
+    
+    if not join_request:
+        raise HTTPException(status_code=404, detail="Join request not found")
+    
+    # Get group and verify creator
+    group = await db.groups.find_one({"_id": ObjectId(join_request["group_id"])})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    if group["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only group creator can accept join requests")
+    
+    if join_request["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Request already processed")
+    
+    # Add user to group
+    await db.groups.update_one(
+        {"_id": ObjectId(join_request["group_id"])},
+        {"$push": {"members": join_request["user_id"]}}
+    )
+    
+    # Update request status
+    await db.group_join_requests.update_one(
+        {"_id": ObjectId(request_id)},
+        {"$set": {"status": "accepted"}}
+    )
+    
+    # Send notification to user
+    user = await db.users.find_one({"_id": ObjectId(join_request["user_id"])})
+    if user and user.get("notification_preferences", {}).get("group_invitations", True):
+        await send_push_notification(
+            join_request["user_id"],
+            "Join Request Accepted",
+            f"Your request to join {group['name']} was accepted!",
+            {"type": "group_join_accepted", "group_id": join_request["group_id"]}
+        )
+    
+    return {"message": "Join request accepted"}
+
+
+@api_router.post("/groups/join-requests/{request_id}/reject")
+async def reject_join_request(
+    request_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Reject a join request (creator only)"""
+    join_request = await db.group_join_requests.find_one({"_id": ObjectId(request_id)})
+    
+    if not join_request:
+        raise HTTPException(status_code=404, detail="Join request not found")
+    
+    # Get group and verify creator
+    group = await db.groups.find_one({"_id": ObjectId(join_request["group_id"])})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    if group["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only group creator can reject join requests")
+    
+    if join_request["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Request already processed")
+    
+    # Update request status
+    await db.group_join_requests.update_one(
+        {"_id": ObjectId(request_id)},
+        {"$set": {"status": "rejected"}}
+    )
+    
+    return {"message": "Join request rejected"}
+
+
+# ==================== GROUPS LIST ROUTES ====================
 
 
 @api_router.post("/groups/{group_id}/invite")
