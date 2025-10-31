@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -308,6 +309,68 @@ async def get_verification_status(current_user_id: str = Depends(get_current_use
         "is_verified": user.get("is_verified", False),
         "email": user["email"]
     }
+
+
+@api_router.delete("/auth/account")
+async def delete_account(current_user_id: str = Depends(get_current_user)):
+    """Delete user account and all associated data"""
+    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Delete all user's data
+    try:
+        # Delete ratings given by user
+        await db.ratings.delete_many({"rater_user_id": current_user_id})
+        
+        # Delete ratings received by user
+        await db.ratings.delete_many({"rated_user_id": current_user_id})
+        
+        # Remove user from all groups
+        await db.groups.update_many(
+            {"members": current_user_id},
+            {"$pull": {"members": current_user_id}}
+        )
+        
+        # Delete groups created by user
+        await db.groups.delete_many({"created_by": current_user_id})
+        
+        # Delete group invitations
+        await db.group_invitations.delete_many({
+            "$or": [
+                {"invited_by": current_user_id},
+                {"invited_user_id": current_user_id}
+            ]
+        })
+        
+        # Remove user from competitions
+        await db.competitions.update_many(
+            {"participants.user_id": current_user_id},
+            {"$pull": {"participants": {"user_id": current_user_id}}}
+        )
+        
+        # Delete competitions created by user
+        await db.competitions.delete_many({"created_by": current_user_id})
+        
+        # Delete competition invitations
+        await db.competition_invitations.delete_many({
+            "$or": [
+                {"invited_by": current_user_id},
+                {"invited_user_id": current_user_id}
+            ]
+        })
+        
+        # Delete notifications
+        await db.notifications.delete_many({"user_id": current_user_id})
+        
+        # Finally, delete the user account
+        await db.users.delete_one({"_id": ObjectId(current_user_id)})
+        
+        return {"message": "Account deleted successfully"}
+    
+    except Exception as e:
+        print(f"Error deleting account {current_user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to delete account")
 
 
 # ==================== PROFILE ROUTES ====================
@@ -1327,34 +1390,8 @@ async def get_group_members(
     return members
 
 
-@api_router.post("/groups/{group_id}/join")
-async def join_group(
-    group_id: str,
-    request: Request,
-    current_user_id: str = Depends(get_current_user)
-):
-    """Join a group"""
-    # Check if user is verified
-    current_user = await db.users.find_one({"_id": ObjectId(current_user_id)})
-    if not current_user or not current_user.get("is_verified", False):
-        raise HTTPException(status_code=403, detail="Please verify your email to join groups")
-    
-    group = await db.groups.find_one({"_id": ObjectId(group_id)})
-    
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    
-    # Check if already a member
-    if current_user_id in group.get("members", []):
-        raise HTTPException(status_code=400, detail="Already a member of this group")
-    
-    # Add user to group
-    await db.groups.update_one(
-        {"_id": ObjectId(group_id)},
-        {"$push": {"members": current_user_id}}
-    )
-    
-    return {"message": "Successfully joined group"}
+# NOTE: Groups are invite-only. Users can only join via invitation acceptance.
+# The public join endpoint has been removed.
 
 
 @api_router.post("/groups/{group_id}/invite")
