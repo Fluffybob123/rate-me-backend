@@ -1484,6 +1484,41 @@ async def get_group_join_requests(
     return result
 
 
+@api_router.get("/groups/join-requests/all")
+async def get_all_join_requests_for_user(
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get all pending join requests for all groups created by current user"""
+    # Find all groups created by user
+    groups = await db.groups.find({"created_by": current_user_id}).to_list(100)
+    group_ids = [str(g["_id"]) for g in groups]
+    
+    if not group_ids:
+        return []
+    
+    # Find all pending join requests for those groups
+    requests = await db.group_join_requests.find({
+        "group_id": {"$in": group_ids},
+        "status": "pending"
+    }).to_list(100)
+    
+    result = []
+    for req in requests:
+        result.append({
+            "id": str(req["_id"]),
+            "group_id": req["group_id"],
+            "group_name": req["group_name"],
+            "user_id": req["user_id"],
+            "username": req["username"],
+            "display_name": req["display_name"],
+            "profile_picture": req.get("profile_picture"),
+            "created_at": req["created_at"]
+        })
+    
+    return result
+
+
 @api_router.post("/groups/join-requests/{request_id}/accept")
 async def accept_join_request(
     request_id: str,
