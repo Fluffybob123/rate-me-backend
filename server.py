@@ -57,34 +57,43 @@ def serialize_doc(doc):
         doc["id"] = str(doc["_id"])
         del doc["_id"]
     
-    # Handle MongoDB datetime format
+    # Handle MongoDB datetime format for created_at
     if doc and "created_at" in doc:
-        if isinstance(doc["created_at"], dict) and "$date" in doc["created_at"]:
-            # Convert MongoDB $date format to datetime
-            from dateutil import parser
-            doc["created_at"] = parser.parse(doc["created_at"]["$date"])
-        elif isinstance(doc["created_at"], str):
-            # Convert string to datetime
-            from dateutil import parser
-            doc["created_at"] = parser.parse(doc["created_at"])
-        # Ensure timezone-aware
-        if doc["created_at"] and doc["created_at"].tzinfo is None:
-            doc["created_at"] = doc["created_at"].replace(tzinfo=timezone.utc)
+        try:
+            if isinstance(doc["created_at"], dict) and "$date" in doc["created_at"]:
+                # Convert MongoDB $date format to datetime
+                from dateutil import parser
+                doc["created_at"] = parser.parse(doc["created_at"]["$date"])
+            elif isinstance(doc["created_at"], str):
+                # Convert string to datetime
+                from dateutil import parser
+                doc["created_at"] = parser.parse(doc["created_at"])
+            # Ensure timezone-aware
+            if doc["created_at"] and doc["created_at"].tzinfo is None:
+                doc["created_at"] = doc["created_at"].replace(tzinfo=timezone.utc)
+        except Exception as e:
+            print(f"Error parsing created_at: {e}")
+            doc["created_at"] = datetime.now(timezone.utc)
     
-    # Handle banner_expiry the same way
+    # Handle banner_expiry with better error handling
     if doc and "banner_expiry" in doc and doc["banner_expiry"]:
-        if isinstance(doc["banner_expiry"], dict) and "$date" in doc["banner_expiry"]:
-            from dateutil import parser
-            doc["banner_expiry"] = parser.parse(doc["banner_expiry"]["$date"])
-        elif isinstance(doc["banner_expiry"], str):
-            from dateutil import parser
-            doc["banner_expiry"] = parser.parse(doc["banner_expiry"])
-        # Ensure timezone-aware
-        if doc["banner_expiry"].tzinfo is None:
-            doc["banner_expiry"] = doc["banner_expiry"].replace(tzinfo=timezone.utc)
-        
-        # Check if banner is expired and clear it
-        if doc["banner_expiry"] < datetime.now(timezone.utc):
+        try:
+            if isinstance(doc["banner_expiry"], dict) and "$date" in doc["banner_expiry"]:
+                from dateutil import parser
+                doc["banner_expiry"] = parser.parse(doc["banner_expiry"]["$date"])
+            elif isinstance(doc["banner_expiry"], str):
+                from dateutil import parser
+                doc["banner_expiry"] = parser.parse(doc["banner_expiry"])
+            # Ensure timezone-aware
+            if doc["banner_expiry"].tzinfo is None:
+                doc["banner_expiry"] = doc["banner_expiry"].replace(tzinfo=timezone.utc)
+            
+            # Check if banner is expired and clear it
+            if doc["banner_expiry"] < datetime.now(timezone.utc):
+                doc["banner"] = None
+                doc["banner_expiry"] = None
+        except Exception as e:
+            print(f"Error parsing banner_expiry: {e}, clearing banner")
             doc["banner"] = None
             doc["banner_expiry"] = None
     
