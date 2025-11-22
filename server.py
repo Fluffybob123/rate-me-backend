@@ -227,13 +227,7 @@ async def get_me(current_user_id: str = Depends(get_current_user)):
     user_response.pop("password", None)
     user_response["is_verified"] = user.get("is_verified", False)
     
-    now = datetime.now(timezone.utc)
-    banner = None
-    if user.get("banner") and user.get("banner_expiry"):
-        if user["banner_expiry"] > now:
-            banner = user["banner"]
-    
-    user_response["banner"] = banner
+    # Banner expiry is already handled in serialize_doc
     
     return UserResponse(**user_response)
 
@@ -445,13 +439,8 @@ async def get_profile(
     user_response["is_friend"] = is_friend
     user_response["friend_request_status"] = friend_request_status
     
-    now = datetime.now(timezone.utc)
-    banner = None
-    if user.get("banner") and user.get("banner_expiry"):
-        if user["banner_expiry"] > now:
-            banner = user["banner"]
-    
-    user_response["banner"] = banner
+    # Banner expiry is already handled in serialize_doc, just pass through
+    # serialize_doc already checks expiry and clears banner if expired
     
     return UserResponse(**user_response)
 
