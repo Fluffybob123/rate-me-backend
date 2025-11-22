@@ -763,15 +763,104 @@ async def join_competition(
 
 
 @api_router.get("/competitions/active", response_model=List[CompetitionResponse])
-async def get_active_competitions(current_user_id: Optional[str] = Depends(get_current_user_optional)):
-    competitions = await db.competitions.find({"status": "active"}).to_list(None)
+async def get_active_competitions(request: Request):
+    """Get all active competitions"""
+    now = datetime.now(timezone.utc)
     
-    result = []
-    for comp in competitions:
-        comp_response = serialize_doc(comp)
-        result.append(CompetitionResponse(**comp_response))
+    # First, finalize any competitions that have ended
+    ended_competitions = await db.competitions.find({
+        "status": "active",
+        "end_date": {"$lte": now}
+    }).to_list(length=100)
     
-    return result
+    for comp in ended_competitions:
+        # Get all participants with their current ratings
+        participant_ratings = []
+        for participant in comp["participants"]:
+            user = await db.users.find_one({"_id": ObjectId(participant["user_id"])})
+            if user:
+                participant_ratings.append({
+                    "user_id": participant["user_id"],
+                    "rating": user.get("average_rating", 0.0)
+                })
+        
+        if len(participant_ratings) < 2:
+            # Mark competition as completed but don't award banners if less than 2 participants
+            await db.competitions.update_one(
+                {"_id": comp["_id"]},
+                {"$set": {"status": "completed"}}
+            )
+            continue
+        
+        # Sort by rating
+        participant_ratings.sort(key=lambda x: x["rating"], reverse=True)
+        
+        winner_id = participant_ratings[0]["user_id"]
+        loser_id = participant_ratings[-1]["user_id"]
+        
+        # Set banners (expires in 7 days)
+        banner_expiry = now + timedelta(days=7)
+        
+        # Award top-rated banner to winner
+        await db.users.update_one(
+            {"_id": ObjectId(winner_id)},
+            {"$set": {"banner": "top-rated", "banner_expiry": banner_expiry}}
+        )
+        
+        # Award try-harder banner to loser
+        await db.users.update_one(
+            {"_id": ObjectId(loser_id)},
+            {"$set": {"banner": "try-harder", "banner_expiry": banner_expiry}}
+        )
+        
+        # Send push notifications to winner and loser
+        try:
+            winner = await db.users.find_one({"_id": ObjectId(winner_id)})
+            loser = await db.users.find_one({"_id": ObjectId(loser_id)})
+            
+            if winner and winner.get("push_token") and winner.get("notifications_enabled", True):
+                await send_push_notification(
+                    winner_id,
+                    "🏆 Competition Winner!",
+                    f'You won the "{comp["name"]}" competition! You have the top-rated banner for 7 days.'
+                )
+            
+            if loser and loser.get("push_token") and loser.get("notifications_enabled", True):
+                await send_push_notification(
+                    loser_id,
+                    "Competition Ended",
+                    f'The "{comp["name"]}" competition has ended. Keep improving your rating!'
+                )
+        except Exception as e:
+            print(f"Failed to send competition result notifications: {e}")
+        
+        # Mark competition as completed and store winner/loser
+        await db.competitions.update_one(
+            {"_id": comp["_id"]},
+            {"$set": {
+                "status": "completed",
+                "winner_id": winner_id,
+                "loser_id": loser_id
+            }}
+        )
+    
+    # Now get only active competitions that haven't ended yet
+    comps = await db.competitions.find({
+        "status": "active",
+        "end_date": {"$gt": now}
+    }).to_list(50)
+    
+    return [CompetitionResponse(
+        id=str(c["_id"]),
+        name=c["name"],
+        start_date=c["start_date"],
+        end_date=c["end_date"],
+        status=c["status"],
+        participants=c["participants"],
+        winner_id=c.get("winner_id"),
+        loser_id=c.get("loser_id"),
+        created_by=c["created_by"]
+    ) for c in comps]
 
 
 @api_router.get("/competitions/my-competitions", response_model=List[CompetitionResponse])
