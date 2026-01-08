@@ -111,7 +111,7 @@ async def send_verification_email(email: str, code: str, username: str):
     """Send verification code via Resend"""
     try:
         params = {
-            "from": "Rate Me <onboarding@resend.dev>",
+            "from": "Rate Me <noreply@verify.rateme5.app>",
             "to": [email],
             "subject": "Verify Your Email - Rate Me",
             "html": f"""
