@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Request, Response, Header
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -1734,6 +1733,59 @@ async def cleanup_expired_banners(request: Request):
         "message": f"Cleaned up {result.modified_count} expired banners",
         "cleaned_count": result.modified_count
     }
+
+
+# ==================== NOTIFICATION PREFERENCES ROUTES ====================
+
+@api_router.get("/notifications/preferences")
+async def get_notification_preferences(
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get user's notification preferences"""
+    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Return preferences or defaults
+    default_preferences = {
+        "reviews": True,
+        "group_invitations": True,
+        "competition_invitations": True,
+        "competition_results": True
+    }
+    
+    preferences = user.get("notification_preferences", default_preferences)
+    return preferences
+
+
+@api_router.put("/notifications/preferences")
+async def update_notification_preferences(
+    preferences: dict,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Update user's notification preferences"""
+    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Validate and sanitize preferences
+    valid_keys = {"reviews", "group_invitations", "competition_invitations", "competition_results"}
+    sanitized_preferences = {
+        k: bool(v) for k, v in preferences.items() if k in valid_keys
+    }
+    
+    # Merge with existing preferences
+    existing_preferences = user.get("notification_preferences", {})
+    existing_preferences.update(sanitized_preferences)
+    
+    await db.users.update_one(
+        {"_id": ObjectId(current_user_id)},
+        {"$set": {"notification_preferences": existing_preferences}}
+    )
+    
+    return existing_preferences
 
 
 # Include the router in the main app
