@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Request, Response, Header
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -35,9 +36,30 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 # MongoDB connection
-mongo_url = os.environ['MONGO_URL']
+mongo_url = os.environ.get('MONGO_URL', 'mongodb://localhost:27017/rateme')
+
+# Parse database name from MONGO_URL or use default
+def get_db_name_from_url(url: str) -> str:
+    """Extract database name from MongoDB URL or return default"""
+    try:
+        # MongoDB URL format: mongodb://[user:pass@]host[:port]/database[?options]
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.path and parsed.path != '/':
+            # Remove leading slash and any query parameters
+            db_path = parsed.path.lstrip('/')
+            if '?' in db_path:
+                db_path = db_path.split('?')[0]
+            return db_path
+    except Exception:
+        pass
+    # Fall back to environment variable or default
+    return os.environ.get('DB_NAME', 'rateme')
+
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+db_name = get_db_name_from_url(mongo_url)
+db = client[db_name]
+logging.info(f"Connected to MongoDB database: {db_name}")
 
 # Resend configuration for email
 resend.api_key = "re_EDuB3JG7_293dQz9dvJo5WGvCEXFVKqrA"
@@ -128,6 +150,36 @@ async def update_user_rating(user_id: str):
 def generate_verification_code() -> str:
     """Generate a 6-digit verification code"""
     return ''.join(random.choices(string.digits, k=6))
+
+
+async def send_push_notification(push_token: str, title: str, body: str, data: dict = None):
+    """Send push notification via Expo Push API"""
+    try:
+        message = {
+            "to": push_token,
+            "sound": "default",
+            "title": title,
+            "body": body,
+        }
+        if data:
+            message["data"] = data
+        
+        async with httpx.AsyncClient() as http_client:
+            response = await http_client.post(
+                "https://exp.host/--/api/v2/push/send",
+                json=message,
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip, deflate",
+                    "Content-Type": "application/json",
+                }
+            )
+            result = response.json()
+            logging.info(f"Push notification sent to {push_token[:20]}...: {result}")
+            return result
+    except Exception as e:
+        logging.error(f"Error sending push notification: {str(e)}")
+        return None
 
 
 async def send_verification_email(email: str, code: str, username: str):
