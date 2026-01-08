@@ -54,7 +54,7 @@ def get_db_name_from_url(url: str) -> str:
     except Exception:
         pass
     # Fall back to environment variable or default
-    return os.environ.get('DB_NAME', 'rateme')
+    return os.environ.get('DB_NAME', 'rate_me')
 
 client = AsyncIOMotorClient(mongo_url)
 db_name = get_db_name_from_url(mongo_url)
