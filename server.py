@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Request, Response, Header
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -1339,6 +1338,22 @@ async def get_group(group_id: str, request: Request):
     )
 
 
+@api_router.get("/groups/{group_id}/members", response_model=List[UserResponse])
+async def get_group_members(group_id: str, request: Request):
+    """Get all members of a group"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    members = []
+    for member_id in group.get("members", []):
+        user = await db.users.find_one({"_id": ObjectId(member_id)})
+        if user:
+            members.append(user_to_response(user))
+    
+    return members
+
+
 # ==================== COMPETITION ROUTES ====================
 
 @api_router.post("/competitions/create", response_model=CompetitionResponse)
@@ -1413,6 +1428,29 @@ async def join_competition(
     )
     
     return {"message": "Joined competition successfully"}
+
+
+@api_router.get("/competitions/{comp_id}", response_model=CompetitionResponse)
+async def get_competition(comp_id: str, request: Request):
+    """Get competition details by ID"""
+    if not ObjectId.is_valid(comp_id):
+        raise HTTPException(status_code=400, detail="Invalid competition ID")
+    
+    comp = await db.competitions.find_one({"_id": ObjectId(comp_id)})
+    if not comp:
+        raise HTTPException(status_code=404, detail="Competition not found")
+    
+    return CompetitionResponse(
+        id=str(comp["_id"]),
+        name=comp["name"],
+        start_date=comp["start_date"],
+        end_date=comp["end_date"],
+        status=comp["status"],
+        participants=comp["participants"],
+        winner_id=comp.get("winner_id"),
+        loser_id=comp.get("loser_id"),
+        created_by=comp["created_by"]
+    )
 
 
 @api_router.get("/competitions/active", response_model=List[CompetitionResponse])
