@@ -45,11 +45,7 @@ def get_db_name_from_url(url: str) -> str:
         from urllib.parse import urlparse
         parsed = urlparse(url)
         if parsed.path and parsed.path != '/':
-            # Remove leading slash and any query parameters
-            db_path = parsed.path.lstrip('/')
-            if '?' in db_path:
-                db_path = db_path.split('?')[0]
-            return db_path
+            return parsed.path.lstrip('/')
     except Exception:
         pass
     # Fall back to environment variable or default
@@ -1310,6 +1306,125 @@ async def get_all_groups(request: Request):
     return result
 
 
+@api_router.get("/groups/search")
+async def search_groups(q: str, request: Request):
+    """Search groups by name"""
+    groups = await db.groups.find({
+        "name": {"$regex": q, "$options": "i"}
+    }).limit(20).to_list(20)
+    
+    result = []
+    for g in groups:
+        member_ratings = []
+        for member_id in g.get("members", []):
+            user = await db.users.find_one({"_id": ObjectId(member_id)})
+            if user:
+                member_ratings.append(user.get("average_rating", 0.0))
+        
+        avg_rating = sum(member_ratings) / len(member_ratings) if member_ratings else 0.0
+        
+        result.append(GroupResponse(
+            id=str(g["_id"]),
+            name=g["name"],
+            description=g.get("description"),
+            average_rating=round(avg_rating, 2),
+            member_count=len(g.get("members", [])),
+            members=g.get("members", []),
+            created_by=g["created_by"],
+            created_at=g["created_at"]
+        ))
+    
+    return result
+
+
+@api_router.get("/groups/invitations/pending")
+async def get_pending_group_invitations(
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get pending group invitations for current user"""
+    invitations = await db.group_invitations.find({
+        "invited_user_id": current_user_id,
+        "status": "pending"
+    }).to_list(100)
+    
+    result = []
+    for inv in invitations:
+        group = await db.groups.find_one({"_id": ObjectId(inv["group_id"])})
+        inviter = await db.users.find_one({"_id": ObjectId(inv["invited_by"])})
+        if group and inviter:
+            result.append({
+                "id": str(inv["_id"]),
+                "group_id": inv["group_id"],
+                "group_name": group["name"],
+                "invited_by": inv["invited_by"],
+                "inviter_name": inviter["display_name"],
+                "created_at": inv["created_at"]
+            })
+    
+    return result
+
+
+@api_router.post("/groups/invitations/{invitation_id}/accept")
+async def accept_group_invitation(
+    invitation_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Accept a group invitation"""
+    invitation = await db.group_invitations.find_one({"_id": ObjectId(invitation_id)})
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    
+    if invitation["invited_user_id"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if invitation["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Invitation already processed")
+    
+    # Add user to group
+    await db.groups.update_one(
+        {"_id": ObjectId(invitation["group_id"])},
+        {"$addToSet": {"members": current_user_id}}
+    )
+    
+    # Update invitation status
+    await db.group_invitations.update_one(
+        {"_id": ObjectId(invitation_id)},
+        {"$set": {"status": "accepted"}}
+    )
+    
+    return {"message": "Invitation accepted"}
+
+
+@api_router.post("/groups/invitations/{invitation_id}/reject")
+async def reject_group_invitation(
+    invitation_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Reject a group invitation"""
+    invitation = await db.group_invitations.find_one({"_id": ObjectId(invitation_id)})
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    
+    if invitation["invited_user_id"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if invitation["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Invitation already processed")
+    
+    # Update invitation status
+    await db.group_invitations.update_one(
+        {"_id": ObjectId(invitation_id)},
+        {"$set": {"status": "rejected"}}
+    )
+    
+    return {"message": "Invitation rejected"}
+
+
 @api_router.get("/groups/{group_id}", response_model=GroupResponse)
 async def get_group(group_id: str, request: Request):
     """Get group details"""
@@ -1352,6 +1467,226 @@ async def get_group_members(group_id: str, request: Request):
             members.append(user_to_response(user))
     
     return members
+
+
+@api_router.put("/groups/{group_id}")
+async def update_group(
+    group_id: str,
+    data: dict,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Update group details (creator only)"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    if group["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only the creator can edit this group")
+    
+    update_data = {}
+    if "name" in data:
+        update_data["name"] = data["name"]
+    if "description" in data:
+        update_data["description"] = data["description"]
+    
+    if update_data:
+        await db.groups.update_one(
+            {"_id": ObjectId(group_id)},
+            {"$set": update_data}
+        )
+    
+    updated_group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    return {"message": "Group updated successfully", "group": {
+        "id": str(updated_group["_id"]),
+        "name": updated_group["name"],
+        "description": updated_group.get("description")
+    }}
+
+
+@api_router.delete("/groups/{group_id}")
+async def delete_group(
+    group_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Delete a group (creator only)"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    if group["created_by"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Only the creator can delete this group")
+    
+    # Delete the group
+    await db.groups.delete_one({"_id": ObjectId(group_id)})
+    
+    # Delete related invitations
+    await db.group_invitations.delete_many({"group_id": group_id})
+    
+    # Delete related join requests
+    await db.group_join_requests.delete_many({"group_id": group_id})
+    
+    return {"message": "Group deleted successfully"}
+
+
+@api_router.post("/groups/{group_id}/invite")
+async def invite_to_group(
+    group_id: str,
+    data: dict,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Invite a user to join a group"""
+    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    
+    # Only members can invite
+    if current_user_id not in group.get("members", []):
+        raise HTTPException(status_code=403, detail="Only group members can invite others")
+    
+    user_id = data.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    
+    # Check if user exists
+    invited_user = await db.users.find_one({"_id": ObjectId(user_id)})
+    if not invited_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check if already a member
+    if user_id in group.get("members", []):
+        raise HTTPException(status_code=400, detail="User is already a member")
+    
+    # Check if invitation already exists
+    existing = await db.group_invitations.find_one({
+        "group_id": group_id,
+        "invited_user_id": user_id,
+        "status": "pending"
+    })
+    if existing:
+        raise HTTPException(status_code=400, detail="Invitation already sent")
+    
+    # Create invitation
+    invitation = {
+        "group_id": group_id,
+        "invited_user_id": user_id,
+        "invited_by": current_user_id,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc)
+    }
+    await db.group_invitations.insert_one(invitation)
+    
+    # Send push notification
+    if invited_user.get("expo_push_token") and invited_user.get("notifications_enabled", True):
+        inviter = await db.users.find_one({"_id": ObjectId(current_user_id)})
+        try:
+            await send_push_notification(
+                invited_user["expo_push_token"],
+                "Group Invitation! 👥",
+                f'{inviter["display_name"]} invited you to join "{group["name"]}"'
+            )
+        except Exception as e:
+            print(f"Failed to send group invitation notification: {e}")
+    
+    return {"message": "Invitation sent successfully"}
+
+
+# ==================== COMPETITION INVITATIONS ====================
+
+@api_router.get("/competitions/invitations/pending")
+async def get_pending_competition_invitations(
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get pending competition invitations for current user"""
+    invitations = await db.competition_invitations.find({
+        "invited_user_id": current_user_id,
+        "status": "pending"
+    }).to_list(100)
+    
+    result = []
+    for inv in invitations:
+        comp = await db.competitions.find_one({"_id": ObjectId(inv["competition_id"])})
+        inviter = await db.users.find_one({"_id": ObjectId(inv["invited_by"])})
+        if comp and inviter:
+            result.append({
+                "id": str(inv["_id"]),
+                "competition_id": inv["competition_id"],
+                "competition_name": comp["name"],
+                "invited_by": inv["invited_by"],
+                "inviter_name": inviter["display_name"],
+                "created_at": inv["created_at"]
+            })
+    
+    return result
+
+
+@api_router.post("/competitions/invitations/{invitation_id}/accept")
+async def accept_competition_invitation(
+    invitation_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Accept a competition invitation"""
+    invitation = await db.competition_invitations.find_one({"_id": ObjectId(invitation_id)})
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    
+    if invitation["invited_user_id"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if invitation["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Invitation already processed")
+    
+    # Get user's current rating
+    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    
+    # Add user to competition
+    await db.competitions.update_one(
+        {"_id": ObjectId(invitation["competition_id"])},
+        {"$push": {"participants": {
+            "user_id": current_user_id,
+            "rating_at_start": user.get("average_rating", 0.0)
+        }}}
+    )
+    
+    # Update invitation status
+    await db.competition_invitations.update_one(
+        {"_id": ObjectId(invitation_id)},
+        {"$set": {"status": "accepted"}}
+    )
+    
+    return {"message": "Invitation accepted"}
+
+
+@api_router.post("/competitions/invitations/{invitation_id}/reject")
+async def reject_competition_invitation(
+    invitation_id: str,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Reject a competition invitation"""
+    invitation = await db.competition_invitations.find_one({"_id": ObjectId(invitation_id)})
+    
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    
+    if invitation["invited_user_id"] != current_user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if invitation["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Invitation already processed")
+    
+    # Update invitation status
+    await db.competition_invitations.update_one(
+        {"_id": ObjectId(invitation_id)},
+        {"$set": {"status": "rejected"}}
+    )
+    
+    return {"message": "Invitation rejected"}
 
 
 # ==================== COMPETITION ROUTES ====================
@@ -1428,29 +1763,6 @@ async def join_competition(
     )
     
     return {"message": "Joined competition successfully"}
-
-
-@api_router.get("/competitions/{comp_id}", response_model=CompetitionResponse)
-async def get_competition(comp_id: str, request: Request):
-    """Get competition details by ID"""
-    if not ObjectId.is_valid(comp_id):
-        raise HTTPException(status_code=400, detail="Invalid competition ID")
-    
-    comp = await db.competitions.find_one({"_id": ObjectId(comp_id)})
-    if not comp:
-        raise HTTPException(status_code=404, detail="Competition not found")
-    
-    return CompetitionResponse(
-        id=str(comp["_id"]),
-        name=comp["name"],
-        start_date=comp["start_date"],
-        end_date=comp["end_date"],
-        status=comp["status"],
-        participants=comp["participants"],
-        winner_id=comp.get("winner_id"),
-        loser_id=comp.get("loser_id"),
-        created_by=comp["created_by"]
-    )
 
 
 @api_router.get("/competitions/active", response_model=List[CompetitionResponse])
@@ -1572,6 +1884,29 @@ async def get_my_competitions(request: Request, current_user_id: str = Depends(g
         loser_id=c.get("loser_id"),
         created_by=c["created_by"]
     ) for c in comps]
+
+
+@api_router.get("/competitions/{comp_id}", response_model=CompetitionResponse)
+async def get_competition(comp_id: str, request: Request):
+    """Get competition details by ID"""
+    if not ObjectId.is_valid(comp_id):
+        raise HTTPException(status_code=400, detail="Invalid competition ID")
+    
+    comp = await db.competitions.find_one({"_id": ObjectId(comp_id)})
+    if not comp:
+        raise HTTPException(status_code=404, detail="Competition not found")
+    
+    return CompetitionResponse(
+        id=str(comp["_id"]),
+        name=comp["name"],
+        start_date=comp["start_date"],
+        end_date=comp["end_date"],
+        status=comp["status"],
+        participants=comp["participants"],
+        winner_id=comp.get("winner_id"),
+        loser_id=comp.get("loser_id"),
+        created_by=comp["created_by"]
+    )
 
 
 @api_router.get("/competitions/{comp_id}/participants", response_model=List[UserResponse])
@@ -1825,6 +2160,39 @@ async def update_notification_preferences(
     )
     
     return existing_preferences
+
+
+@api_router.post("/notifications/register-token")
+async def register_push_token(
+    data: dict,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Register expo push token for notifications"""
+    push_token = data.get("push_token")
+    if not push_token:
+        raise HTTPException(status_code=400, detail="push_token is required")
+    
+    await db.users.update_one(
+        {"_id": ObjectId(current_user_id)},
+        {"$set": {"expo_push_token": push_token}}
+    )
+    
+    return {"message": "Push token registered successfully"}
+
+
+@api_router.get("/qr/generate/{user_id}")
+async def generate_qr_code_alt(user_id: str, request: Request):
+    """Generate QR code data for a user (alternative endpoint)"""
+    user = await db.users.find_one({"_id": ObjectId(user_id)})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {
+        "qr_data": f"rateme://user/{user_id}",
+        "user_id": user_id,
+        "display_name": user.get("display_name", "Unknown")
+    }
 
 
 # Include the router in the main app
