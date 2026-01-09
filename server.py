@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Request, Response, Header
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -1767,12 +1768,26 @@ async def accept_competition_invitation(
     if invitation["status"] != "pending":
         raise HTTPException(status_code=400, detail="Invitation already processed")
     
+    # Get competition and check if already a participant
+    comp = await db.competitions.find_one({"_id": ObjectId(invitation["competition_id"])})
+    if comp and any(p["user_id"] == current_user_id for p in comp.get("participants", [])):
+        # User already a participant, just mark invitation as accepted
+        await db.competition_invitations.update_one(
+            {"_id": ObjectId(invitation_id)},
+            {"$set": {"status": "accepted"}}
+        )
+        return {"message": "You are already in this competition"}
+    
     # Get user's current rating
     user = await db.users.find_one({"_id": ObjectId(current_user_id)})
     
-    # Add user to competition
-    await db.competitions.update_one(
-        {"_id": ObjectId(invitation["competition_id"])},
+    # Add user to competition (check for duplicates)
+    # Using a conditional update to prevent duplicates
+    result = await db.competitions.update_one(
+        {
+            "_id": ObjectId(invitation["competition_id"]),
+            "participants.user_id": {"$ne": current_user_id}  # Only add if not already present
+        },
         {"$push": {"participants": {
             "user_id": current_user_id,
             "rating_at_start": user.get("average_rating", 0.0)
@@ -1886,6 +1901,16 @@ async def join_competition(
     await db.competitions.update_one(
         {"_id": ObjectId(comp_id)},
         {"$push": {"participants": {"user_id": current_user_id, "rating_at_start": user.get("average_rating", 0.0)}}}
+    )
+    
+    # Auto-accept any pending invitations for this user to this competition
+    await db.competition_invitations.update_many(
+        {
+            "competition_id": comp_id,
+            "invited_user_id": current_user_id,
+            "status": "pending"
+        },
+        {"$set": {"status": "accepted"}}
     )
     
     return {"message": "Joined competition successfully"}
