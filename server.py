@@ -24,7 +24,8 @@ from models import (
     CompetitionCreate, CompetitionResponse, CompetitionJoin,
     GroupCreate, GroupResponse, GroupMemberInvite,
     SessionData, EmergentUserData,
-    VerifyEmailRequest, ResendCodeRequest, VerificationResponse
+    VerifyEmailRequest, ResendCodeRequest, VerificationResponse,
+    ReportCreate
 )
 from auth import (
     get_password_hash, verify_password, create_access_token, 
@@ -205,6 +206,45 @@ async def send_verification_email(email: str, code: str, username: str):
         logging.error(f"Error sending verification email to {email}: {str(e)}")
         logging.error(f"Exception type: {type(e).__name__}")
         logging.error(f"Exception details: {repr(e)}")
+        return False
+
+
+async def send_report_email(reporter_username: str, reported_user: dict, reason: str):
+    """Send user report email to admin"""
+    try:
+        params = {
+            "from": "Rate Me <noreply@verify.rateme5.app>",
+            "to": ["inforateme@gmail.com"],
+            "subject": f"User Report: {reported_user.get('username', 'Unknown')} reported",
+            "html": f"""
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <h2 style="color: #dc2626;">⚠️ User Report</h2>
+                <div style="background-color: #fef2f2; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #dc2626;">
+                    <h3 style="margin: 0 0 10px 0; color: #991b1b;">Reported User</h3>
+                    <p style="margin: 5px 0;"><strong>Username:</strong> @{reported_user.get('username', 'Unknown')}</p>
+                    <p style="margin: 5px 0;"><strong>Display Name:</strong> {reported_user.get('display_name', 'Unknown')}</p>
+                    <p style="margin: 5px 0;"><strong>User ID:</strong> {str(reported_user.get('_id', 'Unknown'))}</p>
+                </div>
+                <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <h3 style="margin: 0 0 10px 0; color: #374151;">Reported By</h3>
+                    <p style="margin: 5px 0;"><strong>Username:</strong> @{reporter_username}</p>
+                </div>
+                <div style="background-color: #fff; padding: 20px; border-radius: 8px; margin: 20px 0; border: 1px solid #e5e7eb;">
+                    <h3 style="margin: 0 0 10px 0; color: #374151;">Reason for Report</h3>
+                    <p style="margin: 5px 0; white-space: pre-wrap;">{reason}</p>
+                </div>
+                <p style="color: #666; font-size: 12px; margin-top: 20px;">
+                    This report was submitted on {datetime.now().strftime('%Y-%m-%d at %H:%M UTC')}
+                </p>
+            </div>
+            """
+        }
+        
+        response = resend.Emails.send(params)
+        logging.info(f"Report email sent successfully. Response: {response}")
+        return True
+    except Exception as e:
+        logging.error(f"Error sending report email: {str(e)}")
         return False
 
 
@@ -861,6 +901,53 @@ async def send_friend_request(
     await db.friendships.insert_one(friendship_dict)
     
     return {"message": "Friend request sent"}
+
+
+# ==================== REPORT USER ROUTES ====================
+
+
+@api_router.post("/report/{user_id}")
+async def report_user(
+    user_id: str,
+    report: ReportCreate,
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Report a user for inappropriate behavior"""
+    if user_id == current_user_id:
+        raise HTTPException(status_code=400, detail="Cannot report yourself")
+    
+    # Get the reported user
+    reported_user = await db.users.find_one({"_id": ObjectId(user_id)})
+    if not reported_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Get the reporter
+    reporter = await db.users.find_one({"_id": ObjectId(current_user_id)})
+    if not reporter:
+        raise HTTPException(status_code=404, detail="Reporter not found")
+    
+    # Store the report in database
+    report_dict = {
+        "reported_user_id": user_id,
+        "reporter_user_id": current_user_id,
+        "reason": report.reason,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc)
+    }
+    await db.reports.insert_one(report_dict)
+    
+    # Send email to admin
+    email_sent = await send_report_email(
+        reporter_username=reporter.get("username", "Unknown"),
+        reported_user=reported_user,
+        reason=report.reason
+    )
+    
+    if not email_sent:
+        logging.warning(f"Report saved but email notification failed for user {user_id}")
+    
+    return {"message": "Report submitted successfully. Thank you for helping keep our community safe."}
 
 
 @api_router.put("/friends/accept/{request_id}")
