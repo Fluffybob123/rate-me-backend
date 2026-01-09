@@ -214,7 +214,7 @@ async def send_report_email(reporter_username: str, reported_user: dict, reason:
     try:
         params = {
             "from": "Rate Me <noreply@verify.rateme5.app>",
-            "to": ["inforateme@gmail.com"],
+            "to": ["inforateme5@gmail.com"],
             "subject": f"User Report: {reported_user.get('username', 'Unknown')} reported",
             "html": f"""
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
