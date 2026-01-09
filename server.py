@@ -1289,16 +1289,35 @@ async def accept_join_request(
     if join_request["status"] != "pending":
         raise HTTPException(status_code=400, detail="Request already processed")
     
-    # Add user to group
+    # Check if user is already a member
+    if join_request["user_id"] in group.get("members", []):
+        # User already a member, just mark request as accepted
+        await db.group_join_requests.update_one(
+            {"_id": ObjectId(request_id)},
+            {"$set": {"status": "accepted"}}
+        )
+        return {"message": "User is already a member of this group"}
+    
+    # Add user to group (using $addToSet to prevent duplicates)
     await db.groups.update_one(
         {"_id": ObjectId(join_request["group_id"])},
-        {"$push": {"members": join_request["user_id"]}}
+        {"$addToSet": {"members": join_request["user_id"]}}
     )
     
     # Update request status
     await db.group_join_requests.update_one(
         {"_id": ObjectId(request_id)},
         {"$set": {"status": "accepted"}}
+    )
+    
+    # Auto-reject any pending invitations for this user to this group
+    await db.group_invitations.update_many(
+        {
+            "group_id": join_request["group_id"],
+            "invited_user_id": join_request["user_id"],
+            "status": "pending"
+        },
+        {"$set": {"status": "accepted"}}  # Mark as accepted since they joined
     )
     
     # Send notification to user
@@ -1470,7 +1489,17 @@ async def accept_group_invitation(
     if invitation["status"] != "pending":
         raise HTTPException(status_code=400, detail="Invitation already processed")
     
-    # Add user to group
+    # Check if user is already a member
+    group = await db.groups.find_one({"_id": ObjectId(invitation["group_id"])})
+    if group and current_user_id in group.get("members", []):
+        # User already a member, just mark invitation as accepted
+        await db.group_invitations.update_one(
+            {"_id": ObjectId(invitation_id)},
+            {"$set": {"status": "accepted"}}
+        )
+        return {"message": "You are already a member of this group"}
+    
+    # Add user to group (using $addToSet to prevent duplicates)
     await db.groups.update_one(
         {"_id": ObjectId(invitation["group_id"])},
         {"$addToSet": {"members": current_user_id}}
@@ -1480,6 +1509,16 @@ async def accept_group_invitation(
     await db.group_invitations.update_one(
         {"_id": ObjectId(invitation_id)},
         {"$set": {"status": "accepted"}}
+    )
+    
+    # Auto-accept any pending join requests from this user for this group
+    await db.group_join_requests.update_many(
+        {
+            "group_id": invitation["group_id"],
+            "user_id": current_user_id,
+            "status": "pending"
+        },
+        {"$set": {"status": "accepted"}}  # Mark as accepted since they joined via invite
     )
     
     return {"message": "Invitation accepted"}
