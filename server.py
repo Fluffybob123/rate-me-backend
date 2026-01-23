@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, Request, Response, Header
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -59,7 +58,7 @@ db = client[db_name]
 logging.info(f"Connected to MongoDB database: {db_name}")
 
 # Resend configuration for email
-resend.api_key = "re_EDuB3JG7_293dQz9dvJo5WGvCEXFVKqrA"
+resend.api_key = os.environ.get("RESEND_API_KEY", "re_EDuB3JG7_293dQz9dvJo5WGvCEXFVKqrA")
 
 # Create the main app without a prefix
 app = FastAPI()
