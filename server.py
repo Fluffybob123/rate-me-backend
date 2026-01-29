@@ -759,6 +759,43 @@ async def rate_user(
     # Update user's average rating
     await update_user_rating(user_id)
     
+    # Update competition ratings for the rated user
+    # Find all active competitions the rated user is in and update their comp_rating
+    now = datetime.now(timezone.utc)
+    active_comps = await db.competitions.find({
+        "status": "active",
+        "participants.user_id": user_id
+    }).to_list(None)
+    
+    for comp in active_comps:
+        for idx, participant in enumerate(comp["participants"]):
+            if participant["user_id"] == user_id:
+                # Get participant's join time
+                joined_at = participant.get("joined_at", comp.get("start_date", now))
+                
+                # Count ratings received after joining this competition
+                ratings_after_join = await db.ratings.find({
+                    "rated_user_id": user_id,
+                    "created_at": {"$gte": joined_at}
+                }).to_list(None)
+                
+                if ratings_after_join:
+                    comp_rating = sum(r["stars"] for r in ratings_after_join) / len(ratings_after_join)
+                    comp_ratings_count = len(ratings_after_join)
+                else:
+                    comp_rating = 0.0
+                    comp_ratings_count = 0
+                
+                # Update the participant's competition rating
+                await db.competitions.update_one(
+                    {"_id": comp["_id"], "participants.user_id": user_id},
+                    {"$set": {
+                        f"participants.$.comp_rating": round(comp_rating, 2),
+                        f"participants.$.comp_ratings_count": comp_ratings_count
+                    }}
+                )
+                break
+    
     # Send push notification to the rated user
     rated_user = await db.users.find_one({"_id": ObjectId(user_id)})
     if rated_user and rated_user.get("expo_push_token") and rated_user.get("notifications_enabled", True):
@@ -858,6 +895,34 @@ async def get_ratings(user_id: str, request: Request):
             comment=r.get("comment"),
             created_at=r["created_at"]
         ))
+    
+    return result
+
+
+@api_router.get("/ratings/sent/all", response_model=List[RatingResponse])
+async def get_sent_ratings(
+    request: Request,
+    current_user_id: str = Depends(get_current_user)
+):
+    """Get all ratings sent by the current user"""
+    ratings = await db.ratings.find({"rater_user_id": current_user_id}).sort("created_at", -1).to_list(100)
+    
+    result = []
+    for r in ratings:
+        # Get the rated user's info
+        rated_user = await db.users.find_one({"_id": ObjectId(r["rated_user_id"])})
+        if rated_user:
+            result.append(RatingResponse(
+                id=str(r["_id"]),
+                rated_user_id=r["rated_user_id"],
+                rater_user_id=r["rater_user_id"],
+                rater_username=rated_user["username"],  # This is the rated user's username
+                rater_display_name=rated_user["display_name"],  # This is the rated user's display name
+                rater_profile_picture=rated_user.get("profile_picture"),  # This is the rated user's picture
+                stars=r["stars"],
+                comment=r.get("comment"),
+                created_at=r["created_at"]
+            ))
     
     return result
 
@@ -1789,7 +1854,9 @@ async def accept_competition_invitation(
         },
         {"$push": {"participants": {
             "user_id": current_user_id,
-            "rating_at_start": user.get("average_rating", 0.0)
+            "joined_at": datetime.now(timezone.utc),
+            "comp_rating": 0.0,
+            "comp_ratings_count": 0
         }}}
     )
     
@@ -1851,7 +1918,12 @@ async def create_competition(
         "start_date": start_date,
         "end_date": end_date,
         "status": "active",
-        "participants": [{"user_id": current_user_id, "rating_at_start": 0.0}],
+        "participants": [{
+            "user_id": current_user_id, 
+            "joined_at": start_date,
+            "comp_rating": 0.0,
+            "comp_ratings_count": 0
+        }],
         "winner_id": None,
         "loser_id": None,
         "created_by": current_user_id
@@ -1894,12 +1966,15 @@ async def join_competition(
     if any(p["user_id"] == current_user_id for p in comp["participants"]):
         raise HTTPException(status_code=400, detail="Already joined this competition")
     
-    # Get current rating
-    user = await db.users.find_one({"_id": ObjectId(current_user_id)})
-    
+    # Add participant with comp_rating starting at 0
     await db.competitions.update_one(
         {"_id": ObjectId(comp_id)},
-        {"$push": {"participants": {"user_id": current_user_id, "rating_at_start": user.get("average_rating", 0.0)}}}
+        {"$push": {"participants": {
+            "user_id": current_user_id,
+            "joined_at": datetime.now(timezone.utc),
+            "comp_rating": 0.0,
+            "comp_ratings_count": 0
+        }}}
     )
     
     # Auto-accept any pending invitations for this user to this competition
@@ -2061,7 +2136,7 @@ async def get_competition(comp_id: str, request: Request):
 
 @api_router.get("/competitions/{comp_id}/participants", response_model=List[UserResponse])
 async def get_competition_participants(comp_id: str, request: Request):
-    """Get all participants in a competition with their current ratings"""
+    """Get all participants in a competition with their competition-specific ratings"""
     comp = await db.competitions.find_one({"_id": ObjectId(comp_id)})
     
     if not comp:
@@ -2071,9 +2146,13 @@ async def get_competition_participants(comp_id: str, request: Request):
     for p in comp["participants"]:
         user = await db.users.find_one({"_id": ObjectId(p["user_id"])})
         if user:
-            participants.append(user_to_response(user))
+            user_response = user_to_response(user)
+            # Override with competition-specific rating
+            user_response.average_rating = p.get("comp_rating", 0.0)
+            user_response.total_ratings = p.get("comp_ratings_count", 0)
+            participants.append(user_response)
     
-    # Sort by average rating descending
+    # Sort by competition rating descending
     participants.sort(key=lambda x: x.average_rating, reverse=True)
     
     return participants
@@ -2104,14 +2183,25 @@ async def invite_to_competition(
     if any(p["user_id"] == friend_req.friend_id for p in comp["participants"]):
         raise HTTPException(status_code=400, detail="User already in this competition")
     
-    # Add user to competition
-    await db.competitions.update_one(
-        {"_id": ObjectId(comp_id)},
-        {"$push": {"participants": {
-            "user_id": friend_req.friend_id,
-            "rating_at_start": invitee.get("average_rating", 0.0)
-        }}}
-    )
+    # Check for existing pending invitation
+    existing_inv = await db.competition_invitations.find_one({
+        "competition_id": comp_id,
+        "invited_user_id": friend_req.friend_id,
+        "status": "pending"
+    })
+    
+    if existing_inv:
+        raise HTTPException(status_code=400, detail="User already has a pending invitation")
+    
+    # Create invitation instead of directly adding
+    invitation_dict = {
+        "competition_id": comp_id,
+        "invited_user_id": friend_req.friend_id,
+        "invited_by": current_user_id,
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc)
+    }
+    await db.competition_invitations.insert_one(invitation_dict)
     
     # Send push notification to invited user
     if invitee.get("expo_push_token") and invitee.get("notifications_enabled", True):
